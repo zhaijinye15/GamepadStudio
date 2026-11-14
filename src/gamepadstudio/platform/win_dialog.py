@@ -46,10 +46,11 @@ OFN_OVERWRITEPROMPT = 0x00000002
 OFN_NOCHANGEDIR = 0x00000008
 
 FILTER_JSON = "JSON 映射方案 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0\0"
+FILTER_CSV = "CSV 表格 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0\0"
 
 
 def _parse_filter(filter_string: str, title: str, default_name: str = "",
-                  flags: int = 0) -> Optional[str]:
+                  flags: int = 0, default_ext: str = "json") -> Optional[str]:
     if sys.platform != "win32":
         return None
     buffer = ctypes.create_unicode_buffer(1024)
@@ -63,7 +64,7 @@ def _parse_filter(filter_string: str, title: str, default_name: str = "",
     info.nMaxFile = 1024
     info.lpstrTitle = title
     info.Flags = OFN_NOCHANGEDIR | flags
-    info.lpstrDefExt = "json"
+    info.lpstrDefExt = default_ext
     ok = ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(info))
     if not ok:
         return None
@@ -82,4 +83,15 @@ def save_json(default_name: str, title: str = "保存映射方案") -> Optional[
     result = Path(path)
     if result.suffix.lower() != ".json":
         result = result.with_suffix(".json")
+    return result
+
+
+def save_csv(default_name: str, title: str = "导出 CSV") -> Optional[Path]:
+    path = _parse_filter(FILTER_CSV, title, default_name,
+                         OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST, "csv")
+    if not path:
+        return None
+    result = Path(path)
+    if result.suffix.lower() != ".csv":
+        result = result.with_suffix(".csv")
     return result

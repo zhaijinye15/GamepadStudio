@@ -11,12 +11,13 @@ from .. import __version__
 from ..core.calibration import DeviceCalibration
 from ..core.device_manager import DeviceManager
 from ..core.device_profile import ProfileStore
-from ..core.mapping import MappingProfile, load_builtin_profiles
+from ..core.mapping import BindingRuntime, MappingProfile, load_builtin_profiles
 from ..core.model import PadState
+from ..core.poll_stats import PollStats
 from ..core.rumble import RumbleEngine
 from ..core.virtual_pad import VirtualPad, availability as vigem_availability
 from ..paths import asset_path, bundled_profiles_dir, logs_dir, profiles_dir, user_data_dir
-from ..platform.win_dialog import open_json, save_json
+from ..platform.win_dialog import open_json, save_csv, save_json
 from ..platform.win_keyboard import KeyboardInjector
 from ..settings import load_settings, save_settings
 from . import theme
@@ -32,7 +33,8 @@ MIN_SIZE = (1000, 640)
 DEFAULT_SIZE = (1220, 800)
 
 TABS = (("tester", "测试台"), ("calibration", "摇杆校准"), ("model3d", "3D 模型"),
-        ("mapping", "按键映射"), ("rumble", "震动测试"), ("about", "关于"))
+        ("mapping", "按键映射"), ("stats", "轮询统计"),
+        ("rumble", "震动测试"), ("about", "关于"))
 
 
 class App:
@@ -79,6 +81,11 @@ class App:
         self.profile = MappingProfile()
         self.profile_dirty = False
         self.profile_path = ""
+        # 连发 / 切换 / 宏序列运行时，以及轮询稳定性统计
+        self.binding_runtime = BindingRuntime()
+        self.poll_stats = PollStats()
+        self._last_poll_time: Optional[float] = None
+        self._last_dt = 1.0 / 60.0
         # 校准与方案库：按手柄保存死区/曲线/行程，插上自动匹配加载
         self.calibration = DeviceCalibration()
         self.calibration.reset()
@@ -104,6 +111,7 @@ class App:
         from .screens.mapping import MappingScreen
         from .screens.model3d import Model3DScreen
         from .screens.rumble import RumbleScreen
+        from .screens.stats import StatsScreen
         from .screens.tester import TesterScreen
 
         self.screens = {
@@ -111,6 +119,7 @@ class App:
             "calibration": CalibrationScreen(self),
             "model3d": Model3DScreen(self),
             "mapping": MappingScreen(self),
+            "stats": StatsScreen(self),
             "rumble": RumbleScreen(self),
             "about": AboutScreen(self),
         }
@@ -140,6 +149,8 @@ class App:
         self.selected_key = key
         self.pad_state = None
         self.prev_state = None
+        self._last_poll_time = None
+        self.binding_runtime.reset()
         device = self.manager.find(key)
         self.rumble.set_device(device)
         if device is not None:
@@ -321,19 +332,25 @@ class App:
                 self.pad_state = state
                 self.state_age = 0.0
                 self._poll_counter += 1
+                if self._last_poll_time is not None:
+                    self.poll_stats.record((now - self._last_poll_time) * 1000.0)
+                self._last_poll_time = now
                 self._detect_events(state)
             else:
                 self.state_age += dt
         else:
             self.pad_state = None
+            self._last_poll_time = None
+            self.binding_runtime.reset()
 
+        self._last_dt = dt
         self._poll_rate_update(now)
         self.rumble.tick()
         screen = self.screens[self.tab]
         update = getattr(screen, "update", None)
         if callable(update):
             update(dt)
-        self._apply_output()
+        self._apply_output(dt)
 
     def _poll_rate_update(self, now: float) -> None:
         if now - self._poll_window >= 1.0:
@@ -354,15 +371,16 @@ class App:
         if abs(state.axis("lt") - previous.axis("lt")) > 0.3:
             self.log_event(f"LT 行程 {state.axis('lt'):.2f}")
 
-    def _apply_output(self) -> None:
+    def _apply_output(self, dt: float = 0.0) -> None:
         """根据映射方案决定是否向系统输出（默认关闭，避免误操作）."""
         if not self.settings.get("output_enabled") or self.pad_state is None:
+            self.binding_runtime.reset()
             self.injector.update([])
             if self.virtual_pad.is_open:
                 self.virtual_pad.reset()
             return
         target = self.profile.target
-        outputs = self.profile.evaluate(self.pad_state)
+        outputs = self.binding_runtime.evaluate(self.profile, self.pad_state, dt or self._last_dt)
         if target == "keyboard":
             self.injector.update(outputs.keys())
         elif target.startswith("virtual"):
@@ -371,6 +389,22 @@ class App:
                 self.virtual_pad.open()
             axes = self.profile.resolved_axes(self.pad_state)
             self.virtual_pad.apply(outputs, axes, {"lt": axes["lt"], "rt": axes["rt"]})
+
+    # ------------------------------------------------------------------ 轮询统计
+    def reset_poll_stats(self) -> None:
+        self.poll_stats.reset()
+        self._last_poll_time = None
+        self.set_status("轮询统计已清零")
+
+    def export_poll_csv(self) -> None:
+        if self.poll_stats.samples <= 0:
+            self.set_status("还没有采样数据，先连接手柄跑几秒", 4.0)
+            return
+        path = save_csv("poll-stats.csv", "导出轮询统计 CSV")
+        if path is None:
+            return
+        ok = self.poll_stats.export_csv(path)
+        self.set_status(f"已导出到 {path}" if ok else "导出失败（目标目录不可写）", 5.0)
 
     # ------------------------------------------------------------------ 绘制
     def _draw(self) -> None:

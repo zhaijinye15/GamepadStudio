@@ -38,7 +38,7 @@ VIGEM_ZIP = "ViGEmBus_1.22.0_x64_x86_arm64.exe"
 VIGEM_URL = f"https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/{VIGEM_ZIP}"
 
 WHEELS = ("pygame", "hidapi", "inputs")
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def log(message: str) -> None:

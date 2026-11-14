@@ -35,6 +35,14 @@ from .model import SEMANTIC_AXES, SEMANTIC_BUTTONS, PadState, radial_deadzone
 
 SCHEMA = "gamepadstudio.mapping/1"
 TARGETS = ("monitor", "keyboard", "virtual_xbox360", "virtual_dualshock4")
+#: 触发模式：按住 / 按下切换 / 连发 / 宏序列
+MODES = ("hold", "toggle", "turbo", "macro")
+MODE_LABELS = {
+    "hold": "按住触发",
+    "toggle": "按下切换",
+    "turbo": "连发（按住脉冲）",
+    "macro": "宏序列（按键连招）",
+}
 TARGET_LABELS = {
     "monitor": "仅监视（不输出）",
     "keyboard": "键盘 / 鼠标映射",
@@ -107,19 +115,34 @@ class Binding:
     source: str
     action: str = "none"
     threshold: float = 0.55
+    mode: str = "hold"        # hold / toggle / turbo / macro
+    turbo_hz: float = 12.0    # 连发频率
+    macro: str = ""           # 宏序列文本，例如 "W:80/200|SPACE:60/150"
 
     def to_dict(self) -> dict:
         data = {"source": self.source, "action": self.action}
         if self.action.startswith("axis") or ":" in self.source:
             data["threshold"] = round(self.threshold, 3)
+        if self.mode != "hold":
+            data["mode"] = self.mode
+        if self.mode == "turbo":
+            data["turbo_hz"] = round(self.turbo_hz, 1)
+        if self.mode == "macro" and self.macro:
+            data["macro"] = self.macro
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Binding":
+        mode = str(data.get("mode", "hold"))
+        if mode not in MODES:
+            mode = "hold"
         return cls(
             source=str(data.get("source", "")),
             action=str(data.get("action", "none")),
             threshold=float(data.get("threshold", 0.55)),
+            mode=mode,
+            turbo_hz=max(1.0, min(60.0, float(data.get("turbo_hz", 12.0)))),
+            macro=str(data.get("macro", "")),
         )
 
 
@@ -280,3 +303,166 @@ def load_builtin_profiles(directory: Path) -> List[MappingProfile]:
         except Exception:
             continue
     return profiles
+
+
+# ---------------------------------------------------------------------- 宏序列
+@dataclass
+class MacroStep:
+    """宏序列中的一步：按住某组合键一段时间，再等待一段时间."""
+
+    keys: str
+    hold_ms: int = 60
+    delay_ms: int = 120
+
+    def text(self) -> str:
+        return f"{self.keys}:{self.hold_ms}/{self.delay_ms}"
+
+
+def parse_macro(text: str) -> List[MacroStep]:
+    """把 "W:80/200|SPACE:60/150" 解析成步骤列表；非法片段自动跳过.
+
+    语法：每一步用 ``|`` 分隔，写成 ``按键:按住毫秒/间隔毫秒``；
+    省略毫秒则用默认 60/120。组合键照常写加号，例如 ``CTRL+S:80/150``。
+    """
+    steps: List[MacroStep] = []
+    for raw in str(text or "").split("|"):
+        segment = raw.strip()
+        if not segment:
+            continue
+        body, hold, delay = segment, 60, 120
+        if ":" in segment:
+            body, tail = segment.split(":", 1)
+            parts = tail.split("/")
+            try:
+                hold = int(float(parts[0]))
+                if len(parts) > 1:
+                    delay = int(float(parts[1]))
+            except (TypeError, ValueError):
+                hold, delay = 60, 120
+        keys = body.strip().upper().replace(" ", "")
+        if not keys or not _valid_key_combo(keys):
+            continue
+        steps.append(MacroStep(keys=keys,
+                               hold_ms=max(10, min(2000, hold)),
+                               delay_ms=max(0, min(3000, delay))))
+    return steps
+
+
+def format_macro(steps: Iterable[MacroStep]) -> str:
+    return "|".join(step.text() for step in steps)
+
+
+def describe_binding(binding: Binding) -> str:
+    """映射列表里显示的触发模式说明."""
+    if binding.mode == "turbo":
+        return f"连发 {binding.turbo_hz:.0f}Hz"
+    if binding.mode == "macro":
+        count = len(parse_macro(binding.macro))
+        return f"宏 {count} 步"
+    return MODE_LABELS.get(binding.mode, MODE_LABELS["hold"])
+
+
+class BindingRuntime:
+    """把绑定方案编译成逐帧输出，处理按住 / 切换 / 连发 / 宏序列.
+
+    上层每帧调用 :meth:`evaluate`，拿到「输出动作 -> 强度」字典，
+    与原先 ``MappingProfile.evaluate`` 的返回值格式一致，因此键盘注入与
+    虚拟手柄两条输出链路都不用改。
+    """
+
+    def __init__(self) -> None:
+        self._held: Dict[int, bool] = {}
+        self._toggled: Dict[int, bool] = {}
+        self._phase: Dict[int, float] = {}
+        self._macros: Dict[int, dict] = {}
+
+    def reset(self) -> None:
+        self._held.clear()
+        self._toggled.clear()
+        self._phase.clear()
+        self._macros.clear()
+
+    def evaluate(self, profile: MappingProfile, state: Optional[PadState], dt: float) -> Dict[str, float]:
+        if state is None:
+            self.reset()
+            return {}
+        active = profile.active_sources(state)
+        outputs: Dict[str, float] = {}
+        for index, binding in enumerate(profile.bindings):
+            mode = binding.mode if binding.mode in MODES else "hold"
+            strength = active.get(binding.source, 0.0)
+            if binding.source.startswith(SOURCE_PREFIX_AXIS) and strength < binding.threshold:
+                strength = 0.0
+            pressed = strength > 0.0
+            was_held = self._held.get(index, False)
+            self._held[index] = pressed
+
+            # 宏序列：输出由步骤自己决定，与 binding.action 无关
+            if mode == "macro":
+                if pressed and not was_held:
+                    steps = parse_macro(binding.macro)
+                    if steps:
+                        self._macros[index] = {"steps": steps, "i": 0, "t": 0.0, "phase": "hold"}
+                keys = self._advance_macro(index, dt)
+                if keys:
+                    outputs["keyboard:" + keys] = max(outputs.get("keyboard:" + keys, 0.0), 1.0)
+                continue
+
+            action = binding.action
+            if action == "none":
+                continue
+
+            if mode == "hold":
+                if pressed:
+                    outputs[action] = max(outputs.get(action, 0.0), strength)
+
+            elif mode == "toggle":
+                if pressed and not was_held:
+                    self._toggled[index] = not self._toggled.get(index, False)
+                if self._toggled.get(index, False):
+                    outputs[action] = max(outputs.get(action, 0.0), 1.0)
+
+            elif mode == "turbo":
+                if pressed:
+                    hz = max(1.0, min(60.0, float(binding.turbo_hz or 12.0)))
+                    cycle = 1.0 / hz
+                    phase = (self._phase.get(index, 0.0) + dt) % cycle
+                    self._phase[index] = phase
+                    if phase < cycle * 0.5:
+                        outputs[action] = max(outputs.get(action, 0.0), 1.0)
+                else:
+                    self._phase[index] = 0.0
+
+            elif mode == "macro":
+                if pressed and not was_held:
+                    steps = parse_macro(binding.macro)
+                    if steps:
+                        self._macros[index] = {"steps": steps, "i": 0, "t": 0.0, "phase": "hold"}
+                keys = self._advance_macro(index, dt)
+                if keys:
+                    outputs["keyboard:" + keys] = max(outputs.get("keyboard:" + keys, 0.0), 1.0)
+        return outputs
+
+    def _advance_macro(self, index: int, dt: float) -> str:
+        """推进宏序列，返回当前应按住不放的组合键（空字符串表示间隙）."""
+        state = self._macros.get(index)
+        if not state:
+            return ""
+        steps: List[MacroStep] = state["steps"]
+        state["t"] += dt * 1000.0
+        for _ in range(8):
+            step = steps[state["i"]]
+            if state["phase"] == "hold":
+                if state["t"] < step.hold_ms:
+                    return step.keys
+                state["t"] -= step.hold_ms
+                state["phase"] = "delay"
+            if state["t"] < step.delay_ms:
+                return ""
+            state["t"] -= step.delay_ms
+            state["i"] += 1
+            state["phase"] = "hold"
+            if state["i"] >= len(steps):
+                self._macros.pop(index, None)
+                return ""
+        return ""

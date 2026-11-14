@@ -17,6 +17,9 @@ class MappingScreen:
         self.captured_source = ""
         self.action_kind = 0
         self.action_value = "W"
+        self.mode_index = 0
+        self.turbo_hz = 12.0
+        self.macro_text = ""
         self.error = ""
         self.list_scroll_offset = 0
 
@@ -134,12 +137,12 @@ class MappingScreen:
     def _draw_editor(self, ui, rect: pygame.Rect) -> None:
         app = self.app
         surface = ui.surface
-        editor_h = 176
+        editor_h = 216
         editor = pygame.Rect(rect.x, rect.y, rect.width, editor_h)
         theme.rounded_rect(surface, editor, theme.PANEL, radius=14, border=theme.BORDER_SOFT)
 
         theme.draw_text(surface, ui.fonts.get(14, bold=True), "添加映射", (editor.x + 18, editor.y + 16), theme.TEXT)
-        theme.draw_text(surface, ui.fonts.get(11), "先捕获手柄来源，再指定输出动作",
+        theme.draw_text(surface, ui.fonts.get(11), "先捕获手柄来源，再指定输出动作与触发模式",
                         (editor.x + 18, editor.y + 37), theme.TEXT_MUTED)
 
         # ① 来源
@@ -176,18 +179,42 @@ class MappingScreen:
             chosen = ui.dropdown("pad_button", pygame.Rect(x2 + 162, y2, 130, 34), pad_options, current)
             self.action_value = pad_options[chosen].lower()
 
-        # ③ 添加
+        # ③ 触发模式
+        y3 = y2 + 42
+        mode_options = [mapping_mod.MODE_LABELS[name] for name in mapping_mod.MODES]
+        self.mode_index = ui.dropdown("binding_mode", pygame.Rect(x2, y3, 150, 34), mode_options, self.mode_index)
+        mode = mapping_mod.MODES[self.mode_index]
+        if mode == "turbo":
+            theme.draw_text(surface, ui.fonts.get(11), "频率", (x2 + 166, y3 + 9), theme.TEXT_MUTED)
+            self.turbo_hz = ui.slider("binding_turbo", pygame.Rect(x2 + 204, y3, 170, 34),
+                                      self.turbo_hz, 2.0, 30.0, 1.0, fmt=lambda v: f"{v:.0f} Hz")
+        elif mode == "macro":
+            macro_w = max(160, min(320, editor.right - 150 - (x2 + 162)))
+            self.macro_text = ui.text_input("binding_macro", pygame.Rect(x2 + 162, y3, macro_w, 34),
+                                            self.macro_text, "W:80/200|SPACE:60/150", max_len=220)
+            theme.draw_text(surface, ui.fonts.get(10),
+                            "格式：按键:按住ms/间隔ms，多步用 | 分隔，组合键写 CTRL+S",
+                            (x2 + 162, y3 + 37), theme.TEXT_MUTED)
+
+        # ④ 添加
+        macro_steps = mapping_mod.parse_macro(self.macro_text) if mode == "macro" else []
         can_add = bool(self.captured_source) and (self.action_kind == 2 or bool(self.action_value))
-        if ui.button("add_binding", pygame.Rect(editor.right - 132, y2, 114, 34),
+        if mode == "macro" and not macro_steps:
+            can_add = False
+        if ui.button("add_binding", pygame.Rect(editor.right - 132, y3, 114, 34),
                      "添加到列表", kind="primary", enabled=can_add):
             action = "none"
             if self.action_kind == 0:
                 action = f"keyboard:{self.action_value.strip().upper()}"
             elif self.action_kind == 1:
                 action = f"virtual:{self.action_value.lower()}"
-            self._add_binding(self.captured_source, action)
+            self._add_binding(self.captured_source, action, mode)
+        if mode == "macro" and self.macro_text and not macro_steps:
+            self.error = "宏序列里没有合法按键，检查格式或按键名"
+        elif self.error and self.captured_source:
+            self.error = ""
         if self.error:
-            theme.draw_text(surface, ui.fonts.get(11), self.error, (x2, y2 + 40), theme.DANGER)
+            theme.draw_text(surface, ui.fonts.get(11), self.error, (x2, y3 + 40), theme.DANGER)
 
         # 列表
         list_rect = pygame.Rect(rect.x, editor.bottom + 12, rect.width, rect.bottom - editor.bottom - 12)
@@ -230,9 +257,14 @@ class MappingScreen:
             pygame.draw.polygon(surface, theme.TEXT_MUTED,
                                 [(arrow_x + 22, row.centery - 4), (arrow_x + 28, row.centery), (arrow_x + 22, row.centery + 4)])
             action_label = mapping_mod.describe_action(binding.action)
-            theme.draw_text(surface, ui.fonts.get(13), theme.ellipsize(ui.fonts.get(13), action_label, 190),
+            theme.draw_text(surface, ui.fonts.get(13), theme.ellipsize(ui.fonts.get(13), action_label, 132),
                             (arrow_x + 38, row.centery), theme.ACCENT if binding.action != "none" else theme.TEXT_MUTED,
                             align="midleft")
+            mode_label = mapping_mod.describe_binding(binding)
+            theme.draw_text(surface, ui.fonts.get(10), mode_label,
+                            (row.right - 74, row.centery),
+                            theme.ACCENT_DIM if binding.mode != "hold" else theme.TEXT_MUTED,
+                            align="midright")
             if ui.button(f"del_binding_{index}", pygame.Rect(row.right - 66, row.y + 6, 56, 28),
                          "删除", kind="danger", font_size=11):
                 app.profile.bindings.pop(index)
@@ -254,19 +286,34 @@ class MappingScreen:
         thumb = pygame.Rect(track.x, track.y + int((track.height - thumb_h) * position), track.width, thumb_h)
         theme.rounded_rect(surface, thumb, theme.BORDER, radius=3)
 
-    def _add_binding(self, source: str, action: str) -> None:
+    def _add_binding(self, source: str, action: str, mode: str = "hold") -> None:
         if not source:
             self.error = "请先捕获一个来源"
             return
+        macro_text = ""
+        if mode == "macro":
+            steps = mapping_mod.parse_macro(self.macro_text)
+            if not steps:
+                self.error = "宏序列为空或格式不对"
+                return
+            macro_text = mapping_mod.format_macro(steps)
+            action = f"keyboard:{steps[0].keys}"
+        turbo_hz = round(self.turbo_hz, 1)
         for binding in self.app.profile.bindings:
             if binding.source == source:
                 binding.action = action
+                binding.mode = mode
+                binding.turbo_hz = turbo_hz
+                binding.macro = macro_text
                 self.error = ""
                 self.app.set_status(f"已更新：{mapping_mod.describe_source(source)}")
                 return
-        self.app.profile.bindings.append(Binding(source=source, action=action))
+        self.app.profile.bindings.append(
+            Binding(source=source, action=action, mode=mode, turbo_hz=turbo_hz, macro=macro_text))
         self.error = ""
-        self.app.set_status(f"已添加：{mapping_mod.describe_source(source)} → {mapping_mod.describe_action(action)}")
+        self.app.set_status(
+            f"已添加：{mapping_mod.describe_source(source)} → {mapping_mod.describe_action(action)}"
+            f"（{mapping_mod.describe_binding(self.app.profile.bindings[-1])}）")
 
 
 def _key_name(keycode: int) -> str:

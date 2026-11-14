@@ -17,6 +17,19 @@ LIGHT_DIR = (0.42, -0.55, 0.72)
 DISTANCE = 7.2
 
 
+def _layer(tag: str) -> int:
+    """绘制分层：机身先画，贴附其上的按键/摇杆后画，摇杆帽最后画.
+
+    纯画家算法按面平均深度排序时，跨度很大的机身前脸会把贴合在它表面的
+    按键面片盖住（面片中心深度差很大），所以这里显式分层兜底。
+    """
+    if tag == "body":
+        return 0
+    if tag in ("stickcap_left", "stickcap_right"):
+        return 2
+    return 1
+
+
 class Model3DScreen:
     def __init__(self, app) -> None:
         self.app = app
@@ -70,10 +83,12 @@ class Model3DScreen:
             self.yaw += 0.006
 
         pressed = self._pressed_tags()
-        focal = min(view.width, view.height) * 0.62
         center = (view.centerx, view.centery + int(view.height * 0.04))
 
-        projected: List[Tuple[float, List[Tuple[int, int]], Tuple[int, int, int]]] = []
+        # 第一遍：旋转 + 光照，同时量出当前视角下的投影占比，据此决定焦距
+        staged: List[Tuple[int, float, List[Tuple[float, float, float]], Tuple[int, int, int]]] = []
+        span_x = 0.0
+        span_y = 0.0
         for points, color, tag in self.faces:
             rotated = [_rotate(p, self.yaw, self.pitch) for p in points]
             depth = sum(p[2] for p in rotated) / len(rotated) + DISTANCE
@@ -82,15 +97,28 @@ class Model3DScreen:
             shade = self._light(rotated, color)
             if tag in pressed:
                 shade = (min(255, shade[0] + 90), min(255, shade[1] + 120), min(255, shade[2] + 90))
+            for point in rotated:
+                divisor = point[2] + DISTANCE
+                span_x = max(span_x, abs(point[0] / divisor))
+                span_y = max(span_y, abs(point[1] / divisor))
+            staged.append((_layer(tag), depth, rotated, shade))
+
+        # 留 8% 边距，并按宽高两个方向取更严格的那个焦距
+        focal = min(0.46 * view.width / max(span_x, 1e-3),
+                    0.42 * view.height / max(span_y, 1e-3))
+
+        projected: List[Tuple[int, float, List[Tuple[int, int]], Tuple[int, int, int]]] = []
+        for layer, depth, rotated, shade in staged:
             screen_points = []
             for point in rotated:
                 scale = focal / (point[2] + DISTANCE)
                 screen_points.append((int(center[0] + point[0] * scale),
                                       int(center[1] - point[1] * scale)))
-            projected.append((depth, screen_points, shade))
+            projected.append((layer, depth, screen_points, shade))
 
-        projected.sort(key=lambda item: item[0], reverse=True)
-        for _, screen_points, shade in projected:
+        # 先按层（机身→按键→摇杆帽），层内再由远及近
+        projected.sort(key=lambda item: (item[0], -item[1]))
+        for _, _, screen_points, shade in projected:
             if len(screen_points) < 3:
                 continue
             pygame.draw.polygon(surface, shade, screen_points)

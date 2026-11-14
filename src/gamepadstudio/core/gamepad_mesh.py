@@ -121,9 +121,9 @@ def build_gamepad(segments: int = 40, detail: int = 14) -> List[Face]:
         faces.extend(_cylinder(x, y + 0.12, BODY_HALF_Z * 0.92 + 0.30, 0.24, 0.07,
                                (70, 78, 92), tag=f"stickcap_{which}", detail=detail))
 
-    # 肩键（机身顶部左右两侧的小凸台）
-    for which, x, color in (("lb", -1.72, (92, 100, 114)), ("rb", 1.72, (92, 100, 114))):
-        faces.extend(_box(x, 0.0, BODY_HALF_Z * 0.5, 0.55, 0.28, 0.16,
+    # 肩键（贴在机身上缘左右两侧的小凸台）
+    for which, x, color in (("lb", -1.58, (92, 100, 114)), ("rb", 1.58, (92, 100, 114))):
+        faces.extend(_box(x, 0.56, BODY_HALF_Z * 0.66, 0.42, 0.20, 0.13,
                           color, tag=which))
     return faces
 

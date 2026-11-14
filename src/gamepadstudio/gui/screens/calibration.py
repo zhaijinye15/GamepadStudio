@@ -170,7 +170,7 @@ class CalibrationScreen:
         # 控件
         x0 = cx + radius + 20
         width = rect.right - 18 - x0
-        y = inner.y + 4
+        y = inner.y + 40
         stick.deadzone = ui.slider(f"cal_dz_{which}", pygame.Rect(x0, y, width, 22),
                                    stick.deadzone, 0.0, 0.6, 0.01, lambda v: f"死区 {v:.2f}")
         y += 26
@@ -225,7 +225,7 @@ class CalibrationScreen:
             theme.draw_text(surface, ui.fonts.get(11),
                             f"原始 {value_raw:.2f} → 校准 {value_out:.2f}"
                             + (f" · 行程 {trigger.min_raw:.2f}~{trigger.max_raw:.2f}" if trigger.calibrated else ""),
-                            (inner.x + 74, y + 2), theme.TEXT_MUTED)
+                            (inner.x + 102, y + 2), theme.TEXT_MUTED)
             y += 22
             ui.progress_bar(pygame.Rect(inner.x, y, inner.width - 210, 8), value_out)
             y += 14

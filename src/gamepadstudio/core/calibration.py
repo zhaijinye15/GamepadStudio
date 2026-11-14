@@ -23,7 +23,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .model import AXIS_LT, AXIS_LY, AXIS_RT, AXIS_RX, AXIS_RY, clamp
+from .model import AXIS_LT, AXIS_LX, AXIS_LY, AXIS_RT, AXIS_RX, AXIS_RY, clamp
 
 # ------------------------------------------------------------------ 曲线
 CURVE_KEYS: Tuple[str, ...] = ("linear", "ease_in", "ease_out", "expo", "s_curve")

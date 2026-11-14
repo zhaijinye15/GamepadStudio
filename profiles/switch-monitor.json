@@ -1,0 +1,12 @@
+{
+  "schema": "gamepadstudio.mapping/1",
+  "name": "Switch 手柄 · 仅监视",
+  "target": "monitor",
+  "deadzone": 0.15,
+  "invert_axes": ["ly", "ry"],
+  "bindings": [
+    {"source": "button:guide", "action": "none"},
+    {"source": "button:l3", "action": "none"},
+    {"source": "button:r3", "action": "none"}
+  ]
+}

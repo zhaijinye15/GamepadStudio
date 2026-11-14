@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>架构与打包说明</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0 auto; padding: 48px 28px 80px; max-width: 880px;
+    background: #0e1116; color: #e6edf3;
+    font: 15px/1.85 "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",system-ui,sans-serif;
+  }
+  h1 { font-size: 30px; margin: 0 0 8px; letter-spacing: .5px; }
+  h2 { font-size: 20px; margin: 42px 0 14px; padding-bottom: 8px; border-bottom: 1px solid #2c3746; }
+  h3 { font-size: 16px; margin: 28px 0 10px; color: #40dca0; }
+  p { margin: 10px 0; color: #b9c6d3; }
+  a { color: #56a5ff; }
+  code { background: #1c2430; padding: 2px 6px; border-radius: 4px; color: #7fe7c4; font-size: 13px; }
+  pre { background: #161d27; border: 1px solid #2c3746; border-radius: 10px; padding: 14px 16px; overflow-x: auto; }
+  pre code { background: none; padding: 0; color: #cfd9e4; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid #2c3746; padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: #1c2430; color: #e6edf3; font-weight: 600; }
+  tr:nth-child(even) td { background: #131a23; }
+  ul, ol { margin: 10px 0 10px 22px; color: #b9c6d3; }
+  li { margin: 6px 0; }
+  img { max-width: 100%; border-radius: 12px; border: 1px solid #2c3746; margin: 14px 0; display: block; }
+  blockquote { margin: 14px 0; padding: 10px 16px; border-left: 3px solid #40dca0; background: #161d27; color: #9fb0c0; }
+  hr { border: none; border-top: 1px solid #2c3746; margin: 26px 0; }
+  .footer { margin-top: 56px; color: #68767f; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>架构与打包说明</h1>
+<p>本文面向二次开发/维护者：说明各层职责、数据流、协议实现要点，以及安装包是怎么拼出来的。</p>
+<hr>
+<h2>1. 分层设计</h2>
+<pre><code>┌──────────────────────────────────────────────────────────┐
+│ gui/          即时模式 UI（pygame 自绘，无 tkinter 依赖） │
+│   app.py 主循环 · widgets.py 控件 · screens/* 四个页面     │
+├──────────────────────────────────────────────────────────┤
+│ core/         设备与输入抽象                              │
+│   device_manager ─┬─ backend_sdl (pygame/SDL2)            │
+│                   └─ backend_hid (hidapi + joycon 协议)    │
+│   mapping（JSON 方案 / 捕获 / 输出换算）                   │
+│   rumble（波形引擎） · virtual_pad（ViGEmBus 输出）        │
+├──────────────────────────────────────────────────────────┤
+│ platform/     Windows 原生能力                            │
+│   win_keyboard（SendInput） · win_dialog（comdlg32）       │
+└──────────────────────────────────────────────────────────┘</code></pre>
+<p>上层只依赖 <code>DeviceInfo</code> / <code>PadState</code> 两个数据结构，新增后端（例如 raw HID、XInput 直连） 不需要改界面：实现 <code>enumerate()</code> / <code>poll()</code> / <code>rumble()</code> 后在 <code>DeviceManager</code> 里注册即可。</p>
+<h3>数据流</h3>
+<ol>
+<li><code>App._update()</code> 每帧（60Hz）调用 <code>DeviceManager.poll(device)</code>；</li>
+<li>SDL 后端把 <code>b0..bN / a0..aN / hat</code> 换算成语义按键与轴（<code>layouts.sdl_state</code>）；</li>
+</ol>
+<p>HID 后端从读取线程取最新解析结果（<code>joycon.parse_report</code>）；</p>
+<ol>
+<li><code>MappingProfile.evaluate(state)</code> 用死区/反转后的轴值与阈值，算出本帧要输出的动作集合；</li>
+<li>输出分发到 <code>KeyboardInjector</code>（SendInput）或 <code>VirtualPad</code>（vgamepad）；</li>
+<li>界面只读状态，不写设备，保证「测试」与「输出」解耦。</li>
+</ol>
+<h2>2. 输入后端</h2>
+<h3>SDL 后端</h3>
+<p>Windows 下 SDL 对所有手柄统一了「Game Controller」通道顺序：</p>
+<pre><code>按钮 0..14 = A B X Y BACK GUIDE START LS RS LB RB UP DOWN LEFT RIGHT
+轴   0..5  = LX LY RX RY LT RT（扳机为 -1..1，程序归一化到 0..1）</code></pre>
+<p>十字键既可能出现在按钮位，也可能是 hat，<code>layouts.sdl_state</code> 两者都处理。 震动走 <code>Joystick.rumble(low, high, ms)</code>（SDL 在 Windows 上转成 XInput 触觉指令）。</p>
+<h3>HID 后端（Nintendo）</h3>
+<p>Joy-Con 单只使用时 SDL 只能看到半个手柄，且蓝牙下很难输出震动，因此对 Nintendo 设备 （VID <code>0x057E</code>）改用 hidapi 直连：</p>
+<p>* 打开设备 → 请求 standard full 输入报文（子命令 <code>0x03 / 0x30</code>）→ 读取线程循环 <code>read(64)</code>； * 兼容 <code>0x21</code>（simple HID）与 <code>0x30</code>（full）两种报文，前置布局相同： <code>[2]</code> 电量/连接、<code>[3][4][5]</code> 三组按键、<code>[6..8]</code> 左摇杆、<code>[9..11]</code> 右摇杆； * 摇杆是 12 位（低 8 位 + 高 4 位打包），中心 2048，Y 轴硬件向下为正，解析时翻转； * 震动用 <code>0x10</code> 报文持续下发（约每 20ms 一次），振幅/频率按官方公式编码：</p>
+<pre><code>encoded_freq = round(log2(freq/10) * 32)
+hf = (encoded_freq - 0x60) * 4      # 0x0004..0x01FC，步进 4
+lf = encoded_freq - 0x40            # 0x01..0x7F
+
+amp &gt; 0.23 → encoded_amp = round(log2(amp*8.7) * 32)
+amp &gt; 0.12 → encoded_amp = round(log2(amp*17)  * 16)
+
+byte0 = hf &amp; 0xFF
+byte1 = (encoded_amp &lt;&lt; 1 &amp; 0xFF) + (hf &gt;&gt; 8)
+byte2 = lf + (((encoded_amp &gt;&gt; 1) + 0x40) &gt;&gt; 8)
+byte3 = ((encoded_amp &gt;&gt; 1) + 0x40) &amp; 0xFF</code></pre>
+<p>静默包固定为 <code>00 01 40 40</code>，程序里作为 <code>NEUTRAL_RUMBLE</code> 常量。</p>
+<h2>3. 映射引擎</h2>
+<p>* 来源（source）统一语法：<code>button:&lt;语义键&gt;</code>、<code>axis:&lt;轴&gt;:&lt;+ / -&gt;</code>； * <code>active_sources()</code> 把一帧输入转成「被触发的来源 → 强度」； * <code>evaluate()</code> 只输出超过阈值的轴绑定（默认 0.55），按钮绑定直接为 1.0； * 死区用径向死区（<code>radial_deadzone</code>），避免斜向推动时出现方形死区； * 方案文件带 <code>schema</code> 字段，版本不匹配时拒绝加载，加载时对未知来源/未知按键做清理并记录警告。</p>
+<h2>4. 界面</h2>
+<p>pygame 自绘 + 即时模式控件（<code>UI.begin()</code> → 各控件函数返回交互结果 → <code>draw_overlays()</code>）：</p>
+<p>* 好处是不依赖 tkinter（Windows 的 embeddable Python 不带 Tcl/Tk）， 整个程序只需要 pygame 一个 GUI 依赖，且 60Hz 重绘摇杆/扳机毫无压力； * 中文字体随包分发的 <code>NotoSansSC.otf</code>，避免不同机器字体缺失导致豆腐块； * <code>--screenshot &lt;dir&gt;</code> 可以在无显示器环境（SDL dummy driver）下把四个页面各渲一张 PNG， 便于改版时回归对比，<code>--demo</code> 会注入一份虚拟输入数据，用来检查高亮/数值渲染路径。</p>
+<h2>5. 打包</h2>
+<pre><code>python build/build_installer.py     # 一步出安装包（下载 runtime、装 wheel、调 makensis）</code></pre>
+<p><code>build_installer.py</code> 做的事：</p>
+<ol>
+<li>下载 <strong>python-3.11.9-embed-amd64.zip</strong>（Windows 版可嵌入运行时，约 11MB），解包到 <code>build/payload/runtime</code>；</li>
+<li>改写 <code>python311._pth</code>，把 <code>Lib\site-packages</code> 加进搜索路径并启用 <code>site</code>；</li>
+<li>用 <code>pip install --target ... --platform win_amd64 --python-version 311 --abi cp311 --only-binary=:all:</code></li>
+</ol>
+<p>把 pygame / hidapi / inputs 的 <strong>Windows wheel</strong> 直接铺进去（在 Linux 上也能出 Windows 包）；</p>
+<ol>
+<li>vgamepad 没有 wheel，取 sdist 解包（纯 Python + 自带 ViGEmClient.dll）；</li>
+<li>拷贝程序源码、字体、示例方案、文档、<code>tools/bootstrap.py</code>、ViGEmBus 安装包；</li>
+<li>调 <code>makensis</code> 生成 <code>dist/GamepadStudio-Setup-1.0.0.exe</code>。</li>
+</ol>
+<p>安装包体积来自四块：runtime 约 50MB（含 pygame）、字体 16MB、ViGEmBus 6MB、程序本体 1MB。</p>
+<h3>依赖部署策略</h3>
+<table><thead><tr><th>阶段</th><th>行为</th></tr></thead><tbody><tr><td>打包时</td><td>依赖库已冻结进安装包（离线可装，无需联网）</td></tr><tr><td>安装时</td><td><code>python.exe tools/bootstrap.py --quiet</code> 做导入自检，结果写 <code>runtime/bootstrap.log</code></td></tr><tr><td>缺失时</td><td>bootstrap 从 PyPI 取对应 <code>cp311-win_amd64</code> wheel，<strong>按 zip 解包</strong>到 site-packages（不需要 pip）</td></tr><tr><td>驱动</td><td>检测 <code>HKLM\SYSTEM\CurrentControlSet\Services\ViGEmBus</code>，缺失则静默安装 ViGEmBus</td></tr></tbody></table>
+<h2>6. 测试</h2>
+<pre><code>PYTHONPATH=src python -m unittest discover -s tests -t .</code></pre>
+<p>* <code>tests/test_joycon.py</code>：报文解析（面键/系统键/摇杆/电量/单只 Joy-Con）、震动编码范围与报文布局； * <code>tests/test_mapping.py</code>：死区、反转、阈值、来源捕获、JSON 往返、非法方案清理； * 界面回归：<code>python -m gamepadstudio.main --screenshot build/shots --demo</code>。</p>
+<h2>7. 已知限制</h2>
+<p>* SDL 的震动接口在部分第三方手柄上只是「声明支持但无实际效果」，程序会在「关于」页标出通道状态； * Joy-Con 的 IMU（陀螺仪/加速度）报文已读取但未在界面展示，可在此基础上扩展体感测试； * 虚拟手柄目前支持 Xbox 360 / DualShock 4 两种目标，未做 DualSense 的扳机自适应阻力； * 键盘注入仅 Windows；其他系统可运行测试台，但输出目标会被禁用。</p>
+<p class="footer">Gamepad Studio · 文档由 docs/build_docs.py 从 Markdown 生成</p>
+</body>
+</html>

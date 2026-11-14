@@ -1,0 +1,19 @@
+{
+  "schema": "gamepadstudio.mapping/1",
+  "name": "FPS · 键盘映射",
+  "target": "keyboard",
+  "deadzone": 0.12,
+  "invert_axes": ["ly", "ry"],
+  "bindings": [
+    {"source": "button:rb", "action": "keyboard:mouse_left"},
+    {"source": "button:lt", "action": "keyboard:mouse_right"},
+    {"source": "axis:rt:+", "action": "keyboard:SPACE"},
+    {"source": "button:l3", "action": "keyboard:SHIFT"},
+    {"source": "button:up", "action": "keyboard:W"},
+    {"source": "button:down", "action": "keyboard:S"},
+    {"source": "button:left", "action": "keyboard:A"},
+    {"source": "button:right", "action": "keyboard:D"},
+    {"source": "button:back", "action": "keyboard:TAB"},
+    {"source": "button:start", "action": "keyboard:ESC"}
+  ]
+}

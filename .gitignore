@@ -1,0 +1,6 @@
+dist/
+build/payload/
+build/cache/
+__pycache__/
+*.pyc
+*.exe

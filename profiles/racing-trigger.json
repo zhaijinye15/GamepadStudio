@@ -1,0 +1,16 @@
+{
+  "schema": "gamepadstudio.mapping/1",
+  "name": "赛车 · 扳机线性油门",
+  "target": "virtual_xbox360",
+  "deadzone": 0.08,
+  "invert_axes": ["ly"],
+  "bindings": [
+    {"source": "button:rb", "action": "virtual:rb"},
+    {"source": "button:lb", "action": "virtual:lb"},
+    {"source": "button:a", "action": "virtual:a"},
+    {"source": "button:y", "action": "virtual:y"},
+    {"source": "button:b", "action": "virtual:b"},
+    {"source": "button:x", "action": "virtual:x"},
+    {"source": "button:start", "action": "virtual:start"}
+  ]
+}

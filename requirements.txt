@@ -1,0 +1,8 @@
+# 运行时依赖（Windows）
+pygame>=2.5.0        # 设备枚举、输入轮询、SDL 触觉反馈
+hidapi>=0.14.0       # Joy-Con / Pro Controller 直连读写
+inputs>=0.5          # 手柄/键盘事件抽象（映射层参考实现）
+vgamepad>=0.1.0      # 虚拟 Xbox 360 / DualShock 4 输出（需要 ViGEmBus 驱动）
+
+# 仅打包时需要
+# pillow             # 生成图标（build/make_icon.py）

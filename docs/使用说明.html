@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gamepad Studio 使用说明</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0 auto; padding: 48px 28px 80px; max-width: 880px;
+    background: #0e1116; color: #e6edf3;
+    font: 15px/1.85 "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",system-ui,sans-serif;
+  }
+  h1 { font-size: 30px; margin: 0 0 8px; letter-spacing: .5px; }
+  h2 { font-size: 20px; margin: 42px 0 14px; padding-bottom: 8px; border-bottom: 1px solid #2c3746; }
+  h3 { font-size: 16px; margin: 28px 0 10px; color: #40dca0; }
+  p { margin: 10px 0; color: #b9c6d3; }
+  a { color: #56a5ff; }
+  code { background: #1c2430; padding: 2px 6px; border-radius: 4px; color: #7fe7c4; font-size: 13px; }
+  pre { background: #161d27; border: 1px solid #2c3746; border-radius: 10px; padding: 14px 16px; overflow-x: auto; }
+  pre code { background: none; padding: 0; color: #cfd9e4; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid #2c3746; padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: #1c2430; color: #e6edf3; font-weight: 600; }
+  tr:nth-child(even) td { background: #131a23; }
+  ul, ol { margin: 10px 0 10px 22px; color: #b9c6d3; }
+  li { margin: 6px 0; }
+  img { max-width: 100%; border-radius: 12px; border: 1px solid #2c3746; margin: 14px 0; display: block; }
+  blockquote { margin: 14px 0; padding: 10px 16px; border-left: 3px solid #40dca0; background: #161d27; color: #9fb0c0; }
+  hr { border: none; border-top: 1px solid #2c3746; margin: 26px 0; }
+  .footer { margin-top: 56px; color: #68767f; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Gamepad Studio 使用说明</h1>
+<p>版本 1.0.0 · Windows 10/11 64 位</p>
+<hr>
+<h2>1. 安装</h2>
+<ol>
+<li>双击 <code>GamepadStudio-Setup-1.0.0.exe</code>；</li>
+<li>选择组件：</li>
+</ol>
+<ul>
+<li><strong>主程序（必需）</strong>：程序本体 + 内嵌 Python 运行时 + 依赖库（离线即可用）；</li>
+<li><strong>桌面快捷方式</strong>：装完桌面会生成「Gamepad Studio」图标；</li>
+<li><strong>开始菜单</strong>：含「依赖自检（修复）」与本文档入口；</li>
+<li><strong>ViGEmBus 虚拟手柄驱动</strong>：需要「把手柄映射成虚拟 Xbox 360 / DualShock 4」时勾选，已装过会自动跳过。</li>
+</ul>
+<ol>
+<li>安装结束时安装程序会做一次依赖自检，日志在 <code>runtime\bootstrap.log</code>。</li>
+</ol>
+<blockquote>安装到 <code>C:\Program Files\Gamepad Studio</code> 需要管理员权限；安装过程不会修改系统其他设置， ViGEmBus 是独立驱动，卸载本程序时会保留（其他软件可能也在使用）。</blockquote>
+<h2>2. 连接手柄</h2>
+<table><thead><tr><th>连接方式</th><th>说明</th></tr></thead><tbody><tr><td>USB 直连</td><td>插上后在 1 秒内出现，Xbox / DualShock / Pro Controller 都建议优先用有线</td></tr><tr><td>蓝牙</td><td>Windows 设置 → 蓝牙和其他设备 → 添加设备，配对后按 F5 或点侧栏「刷新」</td></tr><tr><td>Joy-Con</td><td>左右手可单独配对；因为 SDL 对单只 Joy-Con 支持有限，程序改用 hidapi 直连读取，可获得完整按键与 HD 震动</td></tr></tbody></table>
+<p>左侧「手柄设备」列表会显示每个设备的连接方式与布局；点选其中一个即可在右侧测试。</p>
+<h2>3. 测试台</h2>
+<img src="images/tester.png" alt="测试台">
+<p>* <strong>设备卡片</strong>：名称、后端（SDL / HID）、连接方式、按键轴数量、震动通道、电量（Nintendo 设备可读）、实时轮询率； 右侧「震动自检」会发送一次 140ms 脉冲，「重新扫描」重枚举设备。 * <strong>摇杆</strong>：圆点跟随摇杆位置，虚线圆是死区；浅色轨迹是最近 2 秒的移动路径，用来判断回中是否抖动。 * <strong>按键状态</strong>：17 个语义按键（A/B/X/Y、LB/RB、LT/RT、十字键、Back/Start/Guide、L3/R3），按下即高亮。 * <strong>扳机行程</strong>：0 → 1 的模拟量，顶部细线是该通道最近 1.5 秒的走势。 * <strong>原始通道</strong>：<code>A0…A5</code> 原始轴值、HAT 十字键状态、当前按下集合、最近事件日志。 排查「摇杆漂移」「扳机只到 0.8」这类问题时以这里为准。</p>
+<h2>4. 按键映射</h2>
+<img src="images/mapping.png" alt="按键映射">
+<ol>
+<li>左侧「方案设置」：改方案名、选输出目标、调摇杆死区、反转 Y 轴；</li>
+<li>点「① 捕获来源（按手柄按键）」，然后按手柄上想映射的键（或把摇杆/扳机推过阈值），来源会自动填入；</li>
+<li>选输出动作：</li>
+</ol>
+<ul>
+<li><strong>键盘 / 鼠标</strong>：可直接输入 <code>W</code>、<code>CTRL+SHIFT+S</code> 这类组合，或点「捕获按键」后按键盘对应键；</li>
+<li><strong>虚拟手柄按键</strong>：从下拉里选 A/B/X/Y/LB/RB/LT/RT/方向键等；</li>
+<li><strong>不输出</strong>：只记录，方便先搭结构；</li>
+</ul>
+<ol>
+<li>点「添加到列表」；同一来源重复添加会覆盖旧动作；</li>
+<li>「保存为 JSON…」写入文件，「从 JSON 加载…」读取他人分享的方案。</li>
+</ol>
+<p><strong>输出开关</strong>：左下「启用输出」默认关闭。关闭时一切只在界面里演算，不会真的按键或操作手柄； 打开后才会按方案向系统注入键盘事件或驱动虚拟手柄（虚拟手柄需 ViGEmBus）。</p>
+<p>示例方案在 <code>app\profiles\</code>：FPS 键盘映射、赛车扳机线性油门、Switch 仅监视。</p>
+<h2>5. 震动测试</h2>
+<img src="images/rumble.png" alt="震动测试">
+<p>* <strong>波形</strong>：持续震动 / 断续脉冲（0.45s 通断）/ 渐强渐弱（1.4s 循环）/ 心跳（双短脉冲）； * <strong>参数</strong>：低频、高频强度各自独立 0–1，持续时长 0.3–10s； * <strong>单次脉冲 150ms</strong>、<strong>仅低频 300ms</strong>、<strong>仅高频 300ms</strong> 用于分别验证左右马达/音圈； * 左侧波形图会显示包络与当前播放位置，「输出电平」实时显示两路目标振幅。</p>
+<p>不同设备的震动通道：</p>
+<table><thead><tr><th>设备</th><th>通道</th><th>说明</th></tr></thead><tbody><tr><td>Xbox / 通用 HID</td><td>SDL 触觉反馈</td><td>SDL 经 XInput 下发，力度按左右马达拆分</td></tr><tr><td>Switch Pro Controller / Joy-Con</td><td>HID 音圈驱动</td><td>0x10 报文持续驱动，振幅与频率分档编码（HD 震动）</td></tr><tr><td>虚拟手柄</td><td>—</td><td>只转发游戏下发的震动，不参与本页手动测试</td></tr></tbody></table>
+<h2>6. 常见问题</h2>
+<p><strong>看不到手柄</strong></p>
+<ol>
+<li>换个 USB 口（优先机箱后面板直连，避免无源 HUB）；</li>
+<li>蓝牙设备先在「设置 → 蓝牙和其他设备」里确认已连接，再按 F5；</li>
+<li>部分手柄（如 Switch Pro）在 Steam 里被独占时会被隐藏，先退出 Steam；</li>
+<li>打开「关于」页看 SDL / hidapi 是否都显示正常。</li>
+</ol>
+<p><strong>按键对不上</strong> 不同品牌布局不同：Xbox 是 A/B/X/Y，PlayStation 是 ✕/○/□/△，Switch 是 A/B/X/Y 但物理位置相反。 程序按「物理位置」标注，可以在左侧设备列表确认布局类型；需要严格对应时用「捕获来源」直接按实体键。</p>
+<p><strong>摇杆无法回中 / 轻微漂移</strong> 属于硬件公差。把死区调到 0.15–0.25 即可屏蔽；若某个方向始终偏移很大，在「原始通道」里确认是否单侧值异常。</p>
+<p><strong>震动没反应</strong></p>
+<ol>
+<li>先用「单次脉冲 150ms」确认通道；</li>
+<li>蓝牙连接强度明显弱于 USB，属正常；</li>
+<li>Joy-Con 单只使用时只有一枚音圈，左右会合成为单通道；</li>
+<li>第三方手柄可能只声明了 SDL 震动却未实现，换 USB 或换设备验证。</li>
+</ol>
+<p><strong>虚拟手柄创建失败</strong> 提示 <code>ViGEmBus 驱动未安装</code> 时：开始菜单 → Gamepad Studio → 「依赖自检（修复）」， 或手动运行 <code>tools\ViGEmBus_Setup.exe</code>，装完建议重启一次。</p>
+<hr>
+<p>数据目录：<code>%APPDATA%\GamepadStudio</code>（<code>profiles\</code> 映射方案、<code>logs\app.log</code> 运行日志）。 删除该目录即可恢复出厂状态。</p>
+<p class="footer">Gamepad Studio · 文档由 docs/build_docs.py 从 Markdown 生成</p>
+</body>
+</html>

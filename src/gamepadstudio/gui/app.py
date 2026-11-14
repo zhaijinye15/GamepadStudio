@@ -8,12 +8,15 @@ from typing import List, Optional
 import pygame
 
 from .. import __version__
+from ..core.calibration import DeviceCalibration
 from ..core.device_manager import DeviceManager
+from ..core.device_profile import ProfileStore
 from ..core.mapping import MappingProfile, load_builtin_profiles
 from ..core.model import PadState
 from ..core.rumble import RumbleEngine
 from ..core.virtual_pad import VirtualPad, availability as vigem_availability
-from ..paths import asset_path, bundled_profiles_dir, logs_dir, profiles_dir
+from ..paths import asset_path, bundled_profiles_dir, logs_dir, profiles_dir, user_data_dir
+from ..platform.win_dialog import open_json, save_json
 from ..platform.win_keyboard import KeyboardInjector
 from ..settings import load_settings, save_settings
 from . import theme
@@ -28,7 +31,8 @@ HEADER_HEIGHT = 68
 MIN_SIZE = (1000, 640)
 DEFAULT_SIZE = (1220, 800)
 
-TABS = (("tester", "测试台"), ("mapping", "按键映射"), ("rumble", "震动测试"), ("about", "关于"))
+TABS = (("tester", "测试台"), ("calibration", "摇杆校准"), ("model3d", "3D 模型"),
+        ("mapping", "按键映射"), ("rumble", "震动测试"), ("about", "关于"))
 
 
 class App:
@@ -75,6 +79,12 @@ class App:
         self.profile = MappingProfile()
         self.profile_dirty = False
         self.profile_path = ""
+        # 校准与方案库：按手柄保存死区/曲线/行程，插上自动匹配加载
+        self.calibration = DeviceCalibration()
+        self.calibration.reset()
+        self.cal_store = ProfileStore(user_data_dir() / "calibrations")
+        self.calibration_dirty = False
+        self.raw_semantic = {}
         self.status_message = "就绪"
         self.status_until = 0.0
         self._event_error_logged = False
@@ -90,12 +100,16 @@ class App:
         self._select_first_device()
 
         from .screens.about import AboutScreen
+        from .screens.calibration import CalibrationScreen
         from .screens.mapping import MappingScreen
+        from .screens.model3d import Model3DScreen
         from .screens.rumble import RumbleScreen
         from .screens.tester import TesterScreen
 
         self.screens = {
             "tester": TesterScreen(self),
+            "calibration": CalibrationScreen(self),
+            "model3d": Model3DScreen(self),
             "mapping": MappingScreen(self),
             "rumble": RumbleScreen(self),
             "about": AboutScreen(self),
@@ -130,6 +144,19 @@ class App:
         self.rumble.set_device(device)
         if device is not None:
             self.log_event(f"已选择手柄：{device.name}")
+            self._auto_load_calibration(device)
+
+    def _auto_load_calibration(self, device) -> None:
+        """插上/切到某手柄时，自动套用它之前保存的校准方案."""
+        profile = self.cal_store.match(device)
+        if profile is None:
+            self.calibration = DeviceCalibration()
+            self.calibration.reset()
+            self.calibration_dirty = False
+            return
+        self.calibration = profile.calibration
+        self.calibration_dirty = False
+        self.set_status(f"已自动载入校准方案：{profile.label or profile.device_name}")
 
     @property
     def device(self):
@@ -142,6 +169,57 @@ class App:
     def set_status(self, message: str, seconds: float = 3.0) -> None:
         self.status_message = message
         self.status_until = time.monotonic() + seconds
+
+    # ------------------------------------------------------------------ 校准方案
+    def mark_calibration_dirty(self) -> None:
+        self.calibration_dirty = True
+
+    def save_calibration_profile(self, label: str = "") -> None:
+        device = self.device
+        if device is None:
+            self.set_status("没有选中手柄，无法保存方案")
+            return
+        profile = self.cal_store.upsert_for_device(device, self.calibration, label)
+        if profile is None:
+            self.set_status("方案保存失败（目录不可写）", 4.0)
+            return
+        self.calibration_dirty = False
+        self.set_status(f"已保存方案：{profile.label or device.name}")
+
+    def export_calibration(self) -> None:
+        device = self.device
+        if device is None:
+            self.set_status("没有选中手柄")
+            return
+        default_name = f"{(device.name or 'gamepad').replace(' ', '-')}-calibration.json"
+        path = save_json(default_name, "导出校准方案")
+        if path is None:
+            return
+        profile = self.cal_store.upsert_for_device(device, self.calibration,
+                                                  self.calibration_label(device))
+        ok = profile is not None and self.cal_store.export_file(profile, path)
+        self.calibration_dirty = False
+        self.set_status(f"已导出到 {path}" if ok else "导出失败", 4.0)
+
+    def import_calibration(self) -> None:
+        path = open_json("导入校准方案")
+        if path is None:
+            return
+        try:
+            imported = self.cal_store.import_file(path)
+        except Exception as exc:
+            self.set_status(f"导入失败：{exc}", 5.0)
+            return
+        if not imported:
+            self.set_status("文件里没有可用的方案", 4.0)
+            return
+        self.calibration = imported[0].calibration
+        self.calibration_dirty = False
+        self.set_status(f"已导入 {len(imported)} 份方案，并载入 {imported[0].label}", 4.0)
+
+    def calibration_label(self, device) -> str:
+        profile = self.cal_store.match(device)
+        return (profile.label if profile and profile.label else "") or device.name
 
     # ------------------------------------------------------------------ 主循环
     def run(self) -> None:
@@ -237,6 +315,9 @@ class App:
             self.prev_state = self.pad_state
             state = self.manager.poll(device)
             if state is not None:
+                # 先留一份"校准前"的语义轴给校准页采样用，再套用校准结果
+                self.raw_semantic = dict(state.semantic_axes)
+                state.semantic_axes = self.calibration.apply_axes(self.raw_semantic)
                 self.pad_state = state
                 self.state_age = 0.0
                 self._poll_counter += 1

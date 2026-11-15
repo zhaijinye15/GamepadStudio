@@ -19,12 +19,51 @@ class LibraryScreen:
         return
 
     # ------------------------------------------------------------------ 绘制
+    def toolbar_height(self, width: int) -> int:
+        """工具条高度随窗口宽度变化（按行数算），避免按钮被卡片底边裁掉."""
+        rows = self._layout_rows(max(240, width - 36))
+        return 54 + len(rows) * 38 + 14
+
+    def _layout_rows(self, inner_w: int):
+        """按可用宽度贪心排布：放不下就换行，返回每行 [(key, x, w)]."""
+        rows = []
+        row = []
+        cursor = 0
+
+        def push(key: str, width: int) -> None:
+            nonlocal row, cursor
+            gap = 0 if not row else 10
+            if row and cursor + gap + width > inner_w:
+                rows.append(row)
+                row = []
+                cursor = 0
+                gap = 0
+            row.append((key, cursor + gap, width))
+            cursor = cursor + gap + width
+
+        search_w = min(236, max(150, inner_w - 264))
+        push("search", search_w)
+        push("scan", 136)
+        push("refresh", 108)
+        # 三个筛选按钮作为一组整体换行，避免"全部"留在上一行
+        group_w = len(FILTERS) * 92 + (len(FILTERS) - 1) * 10
+        gap = 0 if not row else 10
+        if row and cursor + gap + group_w > inner_w:
+            rows.append(row)
+            row = []
+            cursor = 0
+        for index in range(len(FILTERS)):
+            push(f"filter{index}", 92)
+        if row:
+            rows.append(row)
+        rows.append([("status", 0, 0)])
+        return rows
+
     def draw(self, ui, rect: pygame.Rect) -> None:
-        lib = self.app.library
-        gap = 12
-        top = pygame.Rect(rect.x, rect.y, rect.width, 96)
+        height = self.toolbar_height(rect.width)
+        top = pygame.Rect(rect.x, rect.y, rect.width, height)
         self._draw_toolbar(ui, top)
-        body = pygame.Rect(rect.x, top.bottom + gap, rect.width, max(160, rect.bottom - top.bottom - gap))
+        body = pygame.Rect(rect.x, top.bottom + 12, rect.width, max(120, rect.bottom - top.bottom - 12))
         self._draw_list(ui, body)
 
     # ---------------------------------------------------------------- 工具条
@@ -32,42 +71,40 @@ class LibraryScreen:
         lib = self.app.library
         surface = ui.surface
         inner = ui.card(rect, "游戏库", "扫描本机已安装的游戏，点「启动」即在后台拉起；手游通过 MuMu 模拟器打开")
-
-        self.query = ui.text_input("lib_search", pygame.Rect(inner.x, inner.y + 6, 236, 32),
-                                   self.query, "搜索游戏名…", max_len=32)
+        rows = self._layout_rows(max(240, rect.width - 36))
         scanning = lib.scanning
-        if ui.button("lib_scan", pygame.Rect(inner.x + 246, inner.y + 6, 136, 32),
-                     "扫描中…" if scanning else "扫描本机游戏",
-                     kind="primary", enabled=not scanning, font_size=13):
-            self.app.scan_games()
-        if ui.button("lib_refresh", pygame.Rect(inner.x + 390, inner.y + 6, 108, 32),
-                     "重扫手游", kind="default", font_size=13,
-                     enabled=lib.mumu is not None and not scanning):
-            self.app.refresh_android_games()
 
-        # 筛选按钮
-        x = inner.x + 510
-        for index, label in enumerate(FILTERS):
-            active = self.filter_index == index
-            rect_btn = pygame.Rect(x, inner.y + 6, 92, 32)
-            if ui.button(f"lib_filter_{index}", rect_btn, label,
-                         kind="primary" if active else "ghost", font_size=12):
-                self.filter_index = index
-            x += 98
+        for row_index, items in enumerate(rows):
+            base_y = inner.y + row_index * 38
+            for key, x, width in items:
+                if key == "search":
+                    self.query = ui.text_input("lib_search", pygame.Rect(inner.x + x, base_y + 4, width, 32),
+                                               self.query, "搜索游戏名…", max_len=32)
+                elif key == "scan":
+                    if ui.button("lib_scan", pygame.Rect(inner.x + x, base_y + 4, width, 32),
+                                 "扫描中…" if scanning else "扫描本机游戏",
+                                 kind="primary", enabled=not scanning, font_size=13):
+                        self.app.scan_games()
+                elif key == "refresh":
+                    if ui.button("lib_refresh", pygame.Rect(inner.x + x, base_y + 4, width, 32),
+                                 "重扫手游", kind="default", font_size=13,
+                                 enabled=lib.mumu is not None and not scanning):
+                        self.app.refresh_android_games()
+                elif key.startswith("filter"):
+                    index = int(key[6:])
+                    active = self.filter_index == index
+                    if ui.button(f"lib_filter_{index}", pygame.Rect(inner.x + x, base_y + 4, width, 32),
+                                 FILTERS[index], kind="primary" if active else "ghost", font_size=12):
+                        self.filter_index = index
+                elif key == "status":
+                    status_color = theme.ACCENT if (lib.mumu and lib.mumu.android_started) else theme.TEXT_MUTED
+                    summary = lib.mumu_summary or "未检测到 MuMu 模拟器"
+                    theme.draw_text(surface, ui.fonts.get(12), summary, (inner.x, base_y + 8), status_color)
+                    if lib.mumu is not None and not lib.mumu.android_started:
+                        if ui.button("lib_start_mumu", pygame.Rect(inner.right - 116, base_y + 4, 116, 26),
+                                     "启动 MuMu", kind="warning", font_size=12):
+                            self.app.start_mumu()
 
-        # MuMu 状态行
-        status_color = theme.ACCENT if (lib.mumu and lib.mumu.android_started) else theme.TEXT_MUTED
-        theme.draw_text(surface, ui.fonts.get(12), lib.mumu_summary,
-                        (inner.x, inner.y + 50), status_color)
-        if lib.mumu is not None and not lib.mumu.android_started:
-            if ui.button("lib_start_mumu", pygame.Rect(inner.x + 226, inner.y + 44, 116, 26),
-                         "启动 MuMu", kind="warning", font_size=12):
-                self.app.start_mumu()
-        total = len(lib.games)
-        phone = len([entry for entry in lib.games if entry.kind == "emulator"])
-        theme.draw_text(surface, ui.fonts.get(11),
-                        f"共 {total} 条 · 手游 {phone} 个 · 数据缓存于 %APPDATA%\\GamepadStudio",
-                        (inner.right, inner.y + 50), theme.TEXT_MUTED, align="topright")
 
     # ---------------------------------------------------------------- 列表
     def _visible_games(self):

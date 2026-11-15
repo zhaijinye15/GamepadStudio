@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import List, Optional
 
@@ -11,6 +12,7 @@ from .. import __version__
 from ..core.calibration import DeviceCalibration
 from ..core.device_manager import DeviceManager
 from ..core.device_profile import ProfileStore
+from ..core.game_library import GameLibrary
 from ..core.mapping import BindingRuntime, MappingProfile, load_builtin_profiles
 from ..core.model import PadState
 from ..core.poll_stats import PollStats
@@ -32,8 +34,8 @@ HEADER_HEIGHT = 68
 MIN_SIZE = (1000, 640)
 DEFAULT_SIZE = (1220, 800)
 
-TABS = (("tester", "测试台"), ("calibration", "摇杆校准"), ("model3d", "3D 模型"),
-        ("mapping", "按键映射"), ("stats", "轮询统计"),
+TABS = (("tester", "测试台"), ("library", "游戏库"), ("calibration", "摇杆校准"),
+        ("model3d", "3D 模型"), ("mapping", "按键映射"), ("stats", "轮询统计"),
         ("rumble", "震动测试"), ("about", "关于"))
 
 
@@ -92,6 +94,9 @@ class App:
         self.cal_store = ProfileStore(user_data_dir() / "calibrations")
         self.calibration_dirty = False
         self.raw_semantic = {}
+        # 游戏库：桌面游戏扫描结果缓存 + MuMu 模拟器手游
+        self.library = GameLibrary(user_data_dir() / "game_library.json")
+        self.game_launching = ""
         self.status_message = "就绪"
         self.status_until = 0.0
         self._event_error_logged = False
@@ -108,6 +113,7 @@ class App:
 
         from .screens.about import AboutScreen
         from .screens.calibration import CalibrationScreen
+        from .screens.library import LibraryScreen
         from .screens.mapping import MappingScreen
         from .screens.model3d import Model3DScreen
         from .screens.rumble import RumbleScreen
@@ -116,6 +122,7 @@ class App:
 
         self.screens = {
             "tester": TesterScreen(self),
+            "library": LibraryScreen(self),
             "calibration": CalibrationScreen(self),
             "model3d": Model3DScreen(self),
             "mapping": MappingScreen(self),
@@ -406,6 +413,78 @@ class App:
         ok = self.poll_stats.export_csv(path)
         self.set_status(f"已导出到 {path}" if ok else "导出失败（目标目录不可写）", 5.0)
 
+    # ------------------------------------------------------------------ 游戏库
+    def scan_games(self) -> None:
+        """后台扫描本机游戏；扫描期间界面不阻塞."""
+        if self.library.scanning:
+            return
+        self.library.scanning = True
+        self.set_status("正在扫描本机游戏…", 8.0)
+
+        def worker() -> None:
+            try:
+                count = self.library.scan()
+                self.set_status(f"扫描完成：{count} 条（含手游）", 4.0)
+            except Exception as exc:
+                log.warning("游戏库扫描失败：%s", exc)
+                self.set_status(f"扫描失败：{exc}", 6.0)
+            finally:
+                self.library.scanning = False
+
+        threading.Thread(target=worker, name="game-scan", daemon=True).start()
+
+    def refresh_android_games(self) -> None:
+        if self.library.mumu is None:
+            self.set_status("没有检测到 MuMu 模拟器", 4.0)
+            return
+        self.set_status("正在重扫手游…", 6.0)
+
+        def worker() -> None:
+            try:
+                count = self.library.refresh_android()
+                self.set_status(f"手游：{count} 个" if count else "MuMu 里还没装手游，或模拟器未进入安卓桌面", 5.0)
+            except Exception as exc:
+                self.set_status(f"重扫失败：{exc}", 5.0)
+
+        threading.Thread(target=worker, name="android-scan", daemon=True).start()
+
+    def start_mumu(self) -> None:
+        if self.library.mumu is None:
+            self.set_status("没有检测到 MuMu 模拟器", 4.0)
+            return
+        self.set_status("正在启动 MuMu…", 10.0)
+
+        def worker() -> None:
+            try:
+                ok, message = self.library.ensure_mumu(on_step=lambda text: self.set_status(text, 10.0))
+                if ok:
+                    count = self.library.refresh_android()
+                    self.set_status(f"MuMu 已就绪，找到 {count} 个手游", 5.0)
+                else:
+                    self.set_status(message, 8.0)
+            except Exception as exc:
+                self.set_status(f"启动 MuMu 失败：{exc}", 8.0)
+
+        threading.Thread(target=worker, name="mumu-launch", daemon=True).start()
+
+    def launch_game(self, entry) -> None:
+        """游戏/手游启动：全部放到后台线程，避免等待模拟器时卡住界面."""
+        self.game_launching = entry.name
+        self.set_status(f"正在启动 {entry.name}…", 6.0)
+
+        def worker() -> None:
+            try:
+                ok, message = self.library.launch(entry)
+                self.set_status(message, 6.0 if ok else 8.0)
+                if ok:
+                    self.log_event(f"启动游戏：{entry.name}")
+            except Exception as exc:
+                self.set_status(f"启动失败：{exc}", 8.0)
+            finally:
+                self.game_launching = ""
+
+        threading.Thread(target=worker, name="game-launch", daemon=True).start()
+
     # ------------------------------------------------------------------ 绘制
     def _draw(self) -> None:
         surface = self.ui.surface
@@ -437,8 +516,9 @@ class App:
 
         # 导航
         y = 84
+        spacing = 46 if len(TABS) > 7 else 50
         for key, label in TABS:
-            rect = pygame.Rect(16, y, SIDEBAR_WIDTH - 32, 42)
+            rect = pygame.Rect(16, y, SIDEBAR_WIDTH - 32, 40)
             active = self.tab == key
             if active:
                 theme.rounded_rect(surface, rect, theme.PANEL_ALT, radius=10, border=theme.BORDER)
@@ -452,7 +532,7 @@ class App:
             _, clicked = ui._hit(f"nav_{key}", rect)
             if clicked:
                 self.tab = key
-            y += 50
+            y += spacing
 
         # 设备列表
         y += 18

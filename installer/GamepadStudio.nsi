@@ -16,7 +16,7 @@ SetCompressorDictSize 32
 
 !define APP_NAME      "Gamepad Studio"
 !define APP_NAME_CN   "手柄测试与映射"
-!define APP_VERSION   "1.2.0"
+!define APP_VERSION   "1.3.0"
 !define APP_PUBLISHER "Gamepad Studio Project"
 !define APP_URL       "https://github.com/"
 !define UNINST_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\GamepadStudio"
@@ -38,7 +38,7 @@ BrandingText "${APP_NAME} ${APP_VERSION}"
 ShowInstDetails show
 ShowUninstDetails show
 
-VIProductVersion "1.2.0.0"
+VIProductVersion "1.3.0.0"
 VIAddVersionKey "ProductName"     "${APP_NAME}"
 VIAddVersionKey "ProductVersion"  "${APP_VERSION}"
 VIAddVersionKey "FileVersion"     "${APP_VERSION}.0"
@@ -51,7 +51,7 @@ VIAddVersionKey "Comments"        "手柄测试、按键映射与震动测试工
 !define MUI_UNICON "assets/icon.ico"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "${APP_NAME}"
-!define MUI_WELCOMEPAGE_TEXT "本向导将安装 ${APP_NAME} ${APP_VERSION}。$\r$\n$\r$\n包含：手柄测试台、摇杆校准（死区/曲线/漂移过滤/自动校准）、3D 模型预览、按键映射（连发/切换/宏序列）、轮询稳定性统计、震动测试，以及运行所需的 Python 运行时与依赖库。$\r$\n$\r$\n点击「下一步」继续。"
+!define MUI_WELCOMEPAGE_TEXT "本向导将安装 ${APP_NAME} ${APP_VERSION}。$\r$\n$\r$\n包含：手柄测试台、游戏库（扫描本机游戏、一键启动、MuMu 模拟器手游）、摇杆校准（死区/曲线/漂移过滤/自动校准）、3D 模型预览、按键映射（连发/切换/宏序列）、轮询稳定性统计、震动测试，以及运行所需的 Python 运行时与依赖库。$\r$\n$\r$\n点击「下一步」继续。"
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动 ${APP_NAME}"
 !define MUI_FINISHPAGE_RUN_FUNCTION "LaunchApp"

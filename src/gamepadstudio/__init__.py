@@ -6,7 +6,7 @@
     platform/  Windows 原生能力（文件对话框、键盘注入、DPI）
 """
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 APP_NAME = "Gamepad Studio"
 APP_ID = "GamepadStudio"
 VENDOR = "Gamepad Studio Project"

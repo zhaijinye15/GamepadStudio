@@ -1,0 +1,389 @@
+"""Gamepad Studio 社区后端：FastAPI + SQLite，单机即可跑.
+
+接口一览（全部 /api 前缀）：
+  GET  /api/health                       探活
+  POST /api/register {username,password} 注册，返回 token / user(uid,badge)
+  POST /api/login    {username,password} 登录
+  GET  /api/me                           当前用户
+  GET  /api/profile/{uid}                查某个 UID 的资料
+  GET  /api/posts?limit&offset&kind      帖子列表
+  POST /api/posts    {title,content,kind} 发帖
+  GET  /api/posts/{id}                   帖子详情 + 评论
+  POST /api/posts/{id}/comments {content} 回帖
+  POST /api/posts/{id}/like              点赞 / 取消点赞
+  GET  /api/stats                        用户数 / 帖子数
+
+UID 标识规则（方案 C）：
+  black  —— 管理员名单（环境变量 GS_ADMIN_UIDS）或 role=admin
+  gold   —— 靓号：1~3 位 / 豹子号（同数字）/ 连号 / 整千整万
+  normal —— 其它
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import secrets
+import sqlite3
+import time
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+
+DB_PATH = os.environ.get("GS_COMMUNITY_DB", "/opt/gamepad-community/data/community.db")
+ADMIN_UIDS = {
+    int(x) for x in os.environ.get("GS_ADMIN_UIDS", "").replace("，", ",").split(",") if x.strip().isdigit()
+}
+TOKEN_DAYS = 30
+PW_ROUNDS = 120_000
+
+app = FastAPI(title="Gamepad Studio Community", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ------------------------------------------------------------------ 数据库
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_db() -> None:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    with db() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              uid        INTEGER PRIMARY KEY AUTOINCREMENT,
+              username   TEXT NOT NULL UNIQUE,
+              pw_hash    TEXT NOT NULL,
+              role       TEXT NOT NULL DEFAULT 'user',
+              created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tokens (
+              token      TEXT PRIMARY KEY,
+              uid        INTEGER NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+              created_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS posts (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              uid        INTEGER NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+              title      TEXT NOT NULL,
+              content    TEXT NOT NULL,
+              kind       TEXT NOT NULL DEFAULT 'talk',
+              created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS comments (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+              uid        INTEGER NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+              content    TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS likes (
+              post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+              uid        INTEGER NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+              created_at INTEGER NOT NULL,
+              PRIMARY KEY (post_id, uid)
+            );
+            """
+        )
+        # UID 从 1001 开始，方便记
+        conn.execute(
+            "INSERT OR IGNORE INTO sqlite_sequence(name, seq) VALUES ('users', 1000)"
+        )
+
+
+init_db()
+
+
+# ------------------------------------------------------------------ 工具
+def hash_pw(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PW_ROUNDS)
+    return f"pbkdf2${PW_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def verify_pw(password: str, stored: str) -> bool:
+    try:
+        _algo, rounds, salt_hex, digest_hex = stored.split("$")
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(rounds))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
+
+
+def badge_for(uid: int, role: str) -> str:
+    """方案 C：黑色 = 管理员名单，金色 = 靓号，其它普通."""
+    if role == "admin" or uid in ADMIN_UIDS:
+        return "black"
+    digits = str(uid)
+    if len(digits) <= 3:
+        return "gold"
+    if len(set(digits)) == 1:                                   # 豹子号 8888 / 66666
+        return "gold"
+    if digits.endswith("000") or digits.endswith("0000"):       # 整千整万
+        return "gold"
+    if digits in {"1234", "12345", "123456", "1234567", "2345",
+                  "3456", "4567", "5678", "6789"}:              # 连号
+        return "gold"
+    if len(digits) == 4 and digits[0] == digits[1] and digits[2] == digits[3]:
+        return "gold"                                            # 1122 这种双对
+    return "normal"
+
+
+def new_token(conn: sqlite3.Connection, uid: int) -> str:
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO tokens(token, uid, created_at, expires_at) VALUES (?,?,?,?)",
+        (token, uid, now, now + TOKEN_DAYS * 86400),
+    )
+    return token
+
+
+def current_uid(authorization: Optional[str] = Header(None)) -> int:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "缺少登录凭证")
+    token = authorization.split(" ", 1)[1].strip()
+    with db() as conn:
+        row = conn.execute("SELECT uid, expires_at FROM tokens WHERE token=?", (token,)).fetchone()
+    if not row:
+        raise HTTPException(401, "登录已失效，请重新登录")
+    if row["expires_at"] < int(time.time()):
+        raise HTTPException(401, "登录已过期，请重新登录")
+    return int(row["uid"])
+
+
+def user_row(conn: sqlite3.Connection, uid: int):
+    return conn.execute("SELECT uid, username, role, created_at FROM users WHERE uid=?", (uid,)).fetchone()
+
+
+def public_user(row) -> dict:
+    return {
+        "uid": row["uid"],
+        "username": row["username"],
+        "badge": badge_for(row["uid"], row["role"]),
+        "role": row["role"],
+        "created_at": row["created_at"],
+    }
+
+
+# ------------------------------------------------------------------ 模型
+class AuthIn(BaseModel):
+    username: str = Field(min_length=2, max_length=20)
+    password: str = Field(min_length=6, max_length=64)
+
+
+class PostIn(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=4000)
+    kind: str = Field(default="talk", max_length=20)
+
+
+class CommentIn(BaseModel):
+    content: str = Field(min_length=1, max_length=1000)
+
+
+# ------------------------------------------------------------------ 接口
+@app.get("/api/health")
+def health():
+    with db() as conn:
+        users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+    return {"ok": True, "time": int(time.time()), "users": users, "service": "gamepad-community"}
+
+
+@app.post("/api/register")
+def register(data: AuthIn):
+    username = data.username.strip()
+    if not username:
+        raise HTTPException(400, "用户名不能为空")
+    with db() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?,?,?,?)",
+                (username, hash_pw(data.password), "user", int(time.time())),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "这个用户名已经被注册了")
+        uid = int(cur.lastrowid)
+        token = new_token(conn, uid)
+        row = user_row(conn, uid)
+    return {"token": token, "user": public_user(row)}
+
+
+@app.post("/api/login")
+def login(data: AuthIn):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT uid, username, pw_hash, role, created_at FROM users WHERE username=?",
+            (data.username.strip(),),
+        ).fetchone()
+        if not row or not verify_pw(data.password, row["pw_hash"]):
+            raise HTTPException(401, "用户名或密码不对")
+        token = new_token(conn, int(row["uid"]))
+    return {"token": token, "user": public_user(row)}
+
+
+@app.get("/api/me")
+def me(uid: int = Depends(current_uid)):
+    with db() as conn:
+        row = user_row(conn, uid)
+    if not row:
+        raise HTTPException(404, "用户不存在")
+    return public_user(row)
+
+
+@app.get("/api/profile/{uid}")
+def profile(uid: int):
+    with db() as conn:
+        row = user_row(conn, uid)
+        if not row:
+            raise HTTPException(404, "用户不存在")
+        posts = conn.execute("SELECT COUNT(*) c FROM posts WHERE uid=?", (uid,)).fetchone()["c"]
+    data = public_user(row)
+    data["posts"] = posts
+    return data
+
+
+@app.get("/api/posts")
+def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0), kind: Optional[str] = None):
+    sql = (
+        "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role,"
+        " (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes,"
+        " (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) comments"
+        " FROM posts p JOIN users u ON u.uid=p.uid"
+    )
+    params: list = []
+    if kind:
+        sql += " WHERE p.kind=?"
+        params.append(kind)
+    sql += " ORDER BY p.id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    with db() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {
+        "total": len(rows),
+        "items": [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "content": r["content"],
+                "kind": r["kind"],
+                "created_at": r["created_at"],
+                "likes": r["likes"],
+                "comments": r["comments"],
+                "author": {"uid": r["uid"], "username": r["username"], "badge": badge_for(r["uid"], r["role"])},
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/posts")
+def create_post(data: PostIn, uid: int = Depends(current_uid)):
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO posts(uid, title, content, kind, created_at) VALUES (?,?,?,?,?)",
+            (uid, data.title.strip(), data.content.strip(), data.kind or "talk", int(time.time())),
+        )
+        pid = int(cur.lastrowid)
+    return {"ok": True, "id": pid}
+
+
+@app.get("/api/posts/{post_id}")
+def get_post(post_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role"
+            " FROM posts p JOIN users u ON u.uid=p.uid WHERE p.id=?",
+            (post_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "帖子不存在")
+        comments = conn.execute(
+            "SELECT c.id, c.uid, c.content, c.created_at, u.username, u.role"
+            " FROM comments c JOIN users u ON u.uid=c.uid WHERE c.post_id=? ORDER BY c.id ASC",
+            (post_id,),
+        ).fetchall()
+        likes = conn.execute("SELECT COUNT(*) c FROM likes WHERE post_id=?", (post_id,)).fetchone()["c"]
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "content": row["content"],
+        "kind": row["kind"],
+        "created_at": row["created_at"],
+        "likes": likes,
+        "author": {"uid": row["uid"], "username": row["username"], "badge": badge_for(row["uid"], row["role"])},
+        "comments": [
+            {
+                "id": c["id"],
+                "content": c["content"],
+                "created_at": c["created_at"],
+                "author": {"uid": c["uid"], "username": c["username"], "badge": badge_for(c["uid"], c["role"])},
+            }
+            for c in comments
+        ],
+    }
+
+
+@app.post("/api/posts/{post_id}/comments")
+def add_comment(post_id: int, data: CommentIn, uid: int = Depends(current_uid)):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM posts WHERE id=?", (post_id,)).fetchone():
+            raise HTTPException(404, "帖子不存在")
+        conn.execute(
+            "INSERT INTO comments(post_id, uid, content, created_at) VALUES (?,?,?,?)",
+            (post_id, uid, data.content.strip(), int(time.time())),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/posts/{post_id}/like")
+def toggle_like(post_id: int, uid: int = Depends(current_uid)):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM posts WHERE id=?", (post_id,)).fetchone():
+            raise HTTPException(404, "帖子不存在")
+        existing = conn.execute("SELECT 1 FROM likes WHERE post_id=? AND uid=?", (post_id, uid)).fetchone()
+        if existing:
+            conn.execute("DELETE FROM likes WHERE post_id=? AND uid=?", (post_id, uid))
+            liked = False
+        else:
+            conn.execute("INSERT INTO likes(post_id, uid, created_at) VALUES (?,?,?)",
+                         (post_id, uid, int(time.time())))
+            liked = True
+        total = conn.execute("SELECT COUNT(*) c FROM likes WHERE post_id=?", (post_id,)).fetchone()["c"]
+    return {"ok": True, "liked": liked, "likes": total}
+
+
+@app.get("/api/stats")
+def stats():
+    with db() as conn:
+        users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+        posts = conn.execute("SELECT COUNT(*) c FROM posts").fetchone()["c"]
+        comments = conn.execute("SELECT COUNT(*) c FROM comments").fetchone()["c"]
+    return {"users": users, "posts": posts, "comments": comments}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    with db() as conn:
+        users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+        posts = conn.execute("SELECT COUNT(*) c FROM posts").fetchone()["c"]
+    return f"""<!doctype html><meta charset="utf-8"><title>Gamepad Studio 社区</title>
+<body style="font-family:system-ui;background:#0b0f14;color:#dfe8f5;padding:40px">
+<h2>Gamepad Studio 社区 · 服务在线</h2>
+<p>注册用户 {users} · 帖子 {posts}</p>
+<p>接口文档：<a style="color:#19c37d" href="/docs">/docs</a></p>
+</body>"""

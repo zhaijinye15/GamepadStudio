@@ -10,6 +10,7 @@ import pygame
 
 from .. import __version__
 from ..core.calibration import DeviceCalibration
+from ..core.community import CommunityClient
 from ..core.device_manager import DeviceManager
 from ..core.device_profile import ProfileStore
 from ..core.game_library import GameLibrary
@@ -34,9 +35,9 @@ HEADER_HEIGHT = 68
 MIN_SIZE = (1000, 640)
 DEFAULT_SIZE = (1220, 800)
 
-TABS = (("tester", "测试台"), ("library", "游戏库"), ("calibration", "摇杆校准"),
-        ("model3d", "3D 模型"), ("mapping", "按键映射"), ("stats", "轮询统计"),
-        ("rumble", "震动测试"), ("about", "关于"))
+TABS = (("tester", "测试台"), ("library", "游戏库"), ("community", "社区"),
+        ("calibration", "摇杆校准"), ("model3d", "3D 模型"), ("mapping", "按键映射"),
+        ("stats", "轮询统计"), ("rumble", "震动测试"), ("about", "关于"))
 
 
 class App:
@@ -97,6 +98,8 @@ class App:
         # 游戏库：桌面游戏扫描结果缓存 + MuMu 模拟器手游
         self.library = GameLibrary(user_data_dir() / "game_library.json")
         self.game_launching = ""
+        # 社区：token 存在 %APPDATA%\GamepadStudio\community.json
+        self.community = CommunityClient(user_data_dir() / "community.json")
         self.status_message = "就绪"
         self.status_until = 0.0
         self._event_error_logged = False
@@ -113,6 +116,7 @@ class App:
 
         from .screens.about import AboutScreen
         from .screens.calibration import CalibrationScreen
+        from .screens.community import CommunityScreen
         from .screens.library import LibraryScreen
         from .screens.mapping import MappingScreen
         from .screens.model3d import Model3DScreen
@@ -123,6 +127,7 @@ class App:
         self.screens = {
             "tester": TesterScreen(self),
             "library": LibraryScreen(self),
+            "community": CommunityScreen(self),
             "calibration": CalibrationScreen(self),
             "model3d": Model3DScreen(self),
             "mapping": MappingScreen(self),
@@ -467,6 +472,101 @@ class App:
 
         threading.Thread(target=worker, name="mumu-launch", daemon=True).start()
 
+    # ------------------------------------------------------------------ 社区
+    def community_auth(self, username: str, password: str, register: bool) -> None:
+        """注册 / 登录都走后台线程，失败原因回写界面."""
+        screen = self.screens.get("community")
+        if screen is None:
+            return
+        screen.busy = "reg" if register else "login"
+        screen.error = ""
+        screen.hint = ""
+
+        def worker() -> None:
+            try:
+                if register:
+                    data = self.community.register(username, password)
+                    screen.hint = f"注册成功：UID {data['user']['uid']}，已自动登录"
+                    self.set_status(f"社区注册成功，UID {data['user']['uid']}", 5.0)
+                else:
+                    data = self.community.login(username, password)
+                    screen.hint = f"登录成功：UID {data['user']['uid']}"
+                    self.set_status(f"社区登录成功，UID {data['user']['uid']}", 5.0)
+                screen.password = ""
+                self.community_refresh()
+            except Exception as exc:
+                screen.error = str(exc)
+                self.set_status(f"社区操作失败：{exc}", 6.0)
+            finally:
+                screen.busy = ""
+
+        threading.Thread(target=worker, name="community-auth", daemon=True).start()
+
+    def community_refresh(self) -> None:
+        screen = self.screens.get("community")
+        if screen is None or not self.community.logged_in:
+            return
+        screen.busy = "refresh"
+
+        def worker() -> None:
+            try:
+                posts = self.community.list_posts(30)
+                screen.posts = posts
+                screen.loaded = True
+                screen.error = ""
+            except Exception as exc:
+                screen.error = str(exc)
+            finally:
+                screen.busy = ""
+
+        threading.Thread(target=worker, name="community-refresh", daemon=True).start()
+
+    def community_post(self, title: str, content: str) -> None:
+        screen = self.screens.get("community")
+        if screen is None:
+            return
+        title, content = title.strip(), content.strip()
+        if not title or not content:
+            screen.error = "标题和正文都要写一点"
+            return
+        screen.busy = "post"
+
+        def worker() -> None:
+            try:
+                self.community.create_post(title, content)
+                screen.title = ""
+                screen.content = ""
+                screen.hint = "发布成功"
+                screen.posts = self.community.list_posts(30)
+                self.set_status("帖子已发布", 4.0)
+            except Exception as exc:
+                screen.error = str(exc)
+            finally:
+                screen.busy = ""
+
+        threading.Thread(target=worker, name="community-post", daemon=True).start()
+
+    def community_like(self, post_id: int) -> None:
+        screen = self.screens.get("community")
+        if screen is None or not post_id:
+            return
+        screen.busy = "like"
+
+        def worker() -> None:
+            try:
+                liked, total = self.community.like(post_id)
+                for post in screen.posts:
+                    if int(post.get("id", 0)) == post_id:
+                        post["likes"] = total
+                        break
+                screen.hint = "已点赞" if liked else "已取消点赞"
+            except Exception as exc:
+                screen.error = str(exc)
+            finally:
+                screen.busy = ""
+
+        threading.Thread(target=worker, name="community-like", daemon=True).start()
+
     def launch_game(self, entry) -> None:
         """游戏/手游启动：全部放到后台线程，避免等待模拟器时卡住界面."""
         self.game_launching = entry.name
@@ -516,7 +616,7 @@ class App:
 
         # 导航
         y = 84
-        spacing = 46 if len(TABS) > 7 else 50
+        spacing = 42 if len(TABS) >= 9 else (46 if len(TABS) > 7 else 50)
         for key, label in TABS:
             rect = pygame.Rect(16, y, SIDEBAR_WIDTH - 32, 40)
             active = self.tab == key

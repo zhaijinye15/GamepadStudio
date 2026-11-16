@@ -12,6 +12,7 @@ Windows 手柄测试与按键映射工具。插上手柄即可实时看到**按�
 | --- | --- |
 | 测试台 | 设备信息、摇杆轨迹与死区、17 个语义按键高亮、扳机行程、原始通道数据、按键事件日志 |
 | 游戏库 | 扫描本机游戏（注册表 + Steam 库）并一键后台启动；识别 MuMu 模拟器（含发烧版），列出并启动里面装的手游 |
+| 社区 | 注册 / 登录（用户名 + 密码）、发帖、点赞、UID 徽标（金色靓号 / 黑色认证 / 普通），数据托管在云端，重装不丢 |
 | 摇杆校准 | 自动采集中心零点与行程、独立死区、漂移过滤、5 种响应曲线、X/Y 反向、扳机行程校准与反向，方案按手柄自动匹配加载 |
 | 3D 模型 | 自绘软件投影渲染，拖动机身旋转 / 自动旋转 / 复位视角，按键摇杆实时高亮 |
 | 按键映射 | 捕获手柄来源 → 指定输出（键盘/鼠标、虚拟 Xbox 360、虚拟 DualShock 4）；触发模式支持按住 / 按下切换 / 连发（2–30 Hz）/ 宏序列；方案存为 JSON，可加载/分享 |
@@ -26,7 +27,7 @@ Joy-Con（L/R，走 HID 直连读报文与 HD 震动）、各类通用 HID 手�
 
 ### 方式一：安装包（推荐）
 
-1. 运行 `GamepadStudio-Setup-1.3.0.exe`，按向导完成安装（默认包含 Python 运行时与全部依赖，离线可装）；
+1. 运行 `GamepadStudio-Setup-1.3.1.exe`，按向导完成安装（默认包含 Python 运行时与全部依赖，离线可装）；
 2. 桌面出现「Gamepad Studio」快捷方式，双击启动；
 3. 手柄 USB 直连或蓝牙配对后，左侧设备列表会自动出现该手柄，点选即可开始测试。
 
@@ -62,6 +63,8 @@ GamepadStudio/
 │  │  ├─ backend_hid.py        hidapi 后端（Nintendo 设备线程读报文）
 │  │  ├─ hid/joycon.py         Joy-Con 协议：0x30 报文解析 + 震动编码
 │  │  ├─ device_manager.py     双后端聚合、热插拔、震动路由
+│  │  ├─ game_library.py       注册表 / Steam 扫描、MuMu 检测与手游启动
+│  │  ├─ community.py          社区 REST 客户端（注册 / 登录 / 发帖 / 点赞）
 │  │  ├─ mapping.py            映射方案 JSON、来源捕获、输出换算
 │  │  ├─ rumble.py             波形引擎（包络调度）
 │  │  └─ virtual_pad.py        ViGEmBus + vgamepad 虚拟手柄
@@ -69,10 +72,11 @@ GamepadStudio/
 │  │  ├─ app.py                主循环、侧边栏、状态栏、页面调度
 │  │  ├─ widgets.py            即时模式控件库
 │  │  ├─ theme.py              配色与字体
-│  │  └─ screens/              测试台 / 映射 / 震动 / 关于
+│  │  └─ screens/              九个页面（测试台 / 游戏库 / 社区 / 校准 / 3D / 映射 / 统计 / 震动 / 关于）
 │  └─ platform/                Windows 原生能力
 │     ├─ win_keyboard.py       SendInput 键盘鼠标注入
 │     └─ win_dialog.py         comdlg32 原生文件对话框
+├─ server/                     社区后端（FastAPI + SQLite，可自行部署）
 ├─ profiles/                   示例映射方案（JSON）
 ├─ assets/                     字体（思源黑体 SC）、图标
 ├─ installer/                  NSIS 安装脚本

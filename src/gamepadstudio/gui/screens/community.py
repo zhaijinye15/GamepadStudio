@@ -50,6 +50,10 @@ class CommunityScreen:
         self.loaded = False
         self.busy = ""
 
+    def handle_event(self, event) -> None:
+        """键盘输入由 UI 层统一收口，这里不额外处理（与其它页面保持一致）."""
+        return
+
     # ------------------------------------------------------------------ 绘制
     def draw(self, ui, rect: pygame.Rect) -> None:
         client = self.app.community

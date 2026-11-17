@@ -318,7 +318,9 @@ class App:
         self.ui.begin(self.screen, mouse_pos, mouse_down, mouse_pressed, mouse_released, wheel)
         for event in events:
             self.ui.feed_event(event)
-            self.screens[self.tab].handle_event(event)
+            handler = getattr(self.screens[self.tab], "handle_event", None)
+            if callable(handler):
+                handler(event)
 
     def _update(self, dt: float) -> None:
         now = time.monotonic()

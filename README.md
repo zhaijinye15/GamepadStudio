@@ -13,6 +13,42 @@ Windows 手柄测试与按键映射工具。插上手柄即可实时看到**按�
 | 测试台 | 设备信息、摇杆轨迹与死区、17 个语义按键高亮、扳机行程、原始通道数据、按键事件日志 |
 | 游戏库 | 扫描本机游戏（注册表 + Steam 库）并一键后台启动；识别 MuMu 模拟器（含发烧版），列出并启动里面装的手游 |
 | 社区 | 注册 / 登录、发帖、点赞、UID 徽标（金底「认证」/ 金边「靓号」）、个性化称号 / 配色 / 签名，数据托管在云端，重装不丢 |
+
+## 管理后台（/admin）
+
+服务端自带一个网页管理后台，开局域网 / 公网都能用，界面是深色单页，不依赖任何前端框架。
+
+启用方式：给服务进程加两个环境变量后重启。
+
+```
+GS_ADMIN_PASS=<管理员密码>       # 不设就整个后台关闭
+GS_ADMIN_SECRET=<随机长字符串>    # 会话签名密钥，不设则每次重启掉登录
+```
+
+功能：
+
+| 模块 | 能干什么 |
+|------|---------|
+| 概览 | 用户 / 帖子 / 评论 / 点赞数，今日与 7 天新注册，认证与靓号数量，封禁数，最近操作、最新注册 |
+| 用户 | 搜索（用户名 / UID / 称号）、改称号与签名与配色、直接指定徽标（认证 / 靓号 / 自动）、封禁、改角色、删号（连带帖子评论点赞） |
+| 帖子 | 搜索标题 / 正文 / 作者，删除（连带评论和点赞） |
+| 评论 | 全站评论列表，删除 |
+| 公告 | 发公告（同时只生效一条，等级分普通 / 重要），停用、启用、删除；客户端和官网都会读 `/api/notice` |
+| 日志 | 后台每一步操作都有审计记录，分页查看 |
+| 工具 | 导出用户 / 帖子 / 评论 JSON，在线热备份数据库 |
+
+登录用 HttpOnly Cookie + HMAC 签名，12 小时有效；密码只在服务端环境变量里，不进数据库。
+
+```
+https://<你的域名>/admin
+```
+
+API 一览：`POST /admin/api/login`、`POST /admin/api/logout`、`GET /admin/api/overview`、
+`GET /admin/api/users`、`POST /admin/api/users/{uid}`、`DELETE /admin/api/users/{uid}`、
+`GET /admin/api/posts`、`DELETE /admin/api/posts/{pid}`、`GET /admin/api/comments`、
+`DELETE /admin/api/comments/{cid}`、`GET|POST /admin/api/notices`、
+`POST /admin/api/notices/{id}/toggle`、`DELETE /admin/api/notices/{id}`、
+`GET /admin/api/logs`、`GET /admin/api/export?kind=users|posts|comments`、`GET /admin/api/backup`
 | 摇杆校准 | 自动采集中心零点与行程、独立死区、漂移过滤、5 种响应曲线、X/Y 反向、扳机行程校准与反向，方案按手柄自动匹配加载 |
 | 3D 模型 | 自绘软件投影渲染，拖动机身旋转 / 自动旋转 / 复位视角，按键摇杆实时高亮 |
 | 按键映射 | 捕获手柄来源 → 指定输出（键盘/鼠标、虚拟 Xbox 360、虚拟 DualShock 4）；触发模式支持按住 / 按下切换 / 连发（2–30 Hz）/ 宏序列；方案存为 JSON，可加载/分享 |
@@ -77,6 +113,8 @@ GamepadStudio/
 │     ├─ win_keyboard.py       SendInput 键盘鼠标注入
 │     └─ win_dialog.py         comdlg32 原生文件对话框
 ├─ server/                     社区后端（FastAPI + SQLite，可自行部署）
+│  ├─ app.py                  主服务：注册 / 登录 / 帖子 / 评论 / 点赞 / 个性化 / 公告
+│  └─ admin_panel.py          管理后台：/admin 网页 + JSON API（用户、内容、公告、日志、备份）
 ├─ profiles/                   示例映射方案（JSON）
 ├─ assets/                     字体（思源黑体 SC）、图标
 ├─ installer/                  NSIS 安装脚本

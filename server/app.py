@@ -40,6 +40,11 @@ ADMIN_UIDS = {
 TOKEN_DAYS = 30
 PW_ROUNDS = 120_000
 
+
+def admin_uid_list() -> str:
+    """后台展示用的名单原文，改环境变量重启即生效."""
+    return os.environ.get("GS_ADMIN_UIDS", "").strip()
+
 # 个性化：称号 / 签名长度上限，配色白名单（客户端同一份色板）
 TITLE_MAX = 8
 BIO_MAX = 40
@@ -115,6 +120,19 @@ def init_db() -> None:
               created_at INTEGER NOT NULL,
               PRIMARY KEY (post_id, uid)
             );
+            CREATE TABLE IF NOT EXISTS admin_log (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts         INTEGER NOT NULL,
+              action     TEXT NOT NULL,
+              detail     TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS notices (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              text       TEXT NOT NULL,
+              level      TEXT NOT NULL DEFAULT 'info',
+              active     INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL
+            );
             """
         )
         # UID 从 1001 开始，方便记
@@ -123,9 +141,11 @@ def init_db() -> None:
         )
         # 老库补列：个性化字段（称号 / 签名 / 配色）
         have = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-        for col in ("title", "bio", "color"):
+        for col in ("title", "bio", "color", "badge_override"):
             if col not in have:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        if "banned" not in have:
+            conn.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
 
 
 init_db()
@@ -147,8 +167,12 @@ def verify_pw(password: str, stored: str) -> bool:
         return False
 
 
-def badge_for(uid: int, role: str) -> str:
-    """方案 C：黑色 = 管理员名单，金色 = 靓号，其它普通."""
+def badge_for(uid: int, role: str, override: str = "") -> str:
+    """方案 C：黑色 = 管理员名单，金色 = 靓号，其它普通；后台 override 优先."""
+    if override == "black":
+        return "black"
+    if override == "gold":
+        return "gold"
     if role == "admin" or uid in ADMIN_UIDS:
         return "black"
     digits = str(uid)
@@ -191,7 +215,7 @@ def current_uid(authorization: Optional[str] = Header(None)) -> int:
 
 def user_row(conn: sqlite3.Connection, uid: int):
     return conn.execute(
-        "SELECT uid, username, role, created_at, title, bio, color FROM users WHERE uid=?",
+        "SELECT uid, username, role, created_at, title, bio, color, badge_override FROM users WHERE uid=?",
         (uid,),
     ).fetchone()
 
@@ -207,7 +231,7 @@ def public_user(row) -> dict:
     return {
         "uid": row["uid"],
         "username": row["username"],
-        "badge": badge_for(row["uid"], row["role"]),
+        "badge": badge_for(row["uid"], row["role"], _pick(row, "badge_override")),
         "role": row["role"],
         "created_at": row["created_at"],
         "title": _pick(row, "title"),
@@ -216,11 +240,12 @@ def public_user(row) -> dict:
     }
 
 
-def author_of(row, title_key: str = "title", color_key: str = "color") -> dict:
+def author_of(row, title_key: str = "title", color_key: str = "color",
+              badge_key: str = "badge_override") -> dict:
     return {
         "uid": row["uid"],
         "username": row["username"],
-        "badge": badge_for(row["uid"], row["role"]),
+        "badge": badge_for(row["uid"], row["role"], _pick(row, badge_key)),
         "title": _pick(row, title_key),
         "color": _pick(row, color_key),
     }
@@ -280,11 +305,13 @@ def register(data: AuthIn):
 def login(data: AuthIn):
     with db() as conn:
         row = conn.execute(
-            "SELECT uid, username, pw_hash, role, created_at, title, bio, color FROM users WHERE username=?",
+            "SELECT uid, username, pw_hash, role, created_at, title, bio, color, badge_override, banned FROM users WHERE username=?",
             (data.username.strip(),),
         ).fetchone()
         if not row or not verify_pw(data.password, row["pw_hash"]):
             raise HTTPException(401, "用户名或密码不对")
+        if row["banned"]:
+            raise HTTPException(403, "这个账号已被封禁")
         token = new_token(conn, int(row["uid"]))
     return {"token": token, "user": public_user(row)}
 
@@ -337,7 +364,7 @@ def update_me(data: ProfileIn, uid: int = Depends(current_uid)):
 def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0), kind: Optional[str] = None):
     sql = (
         "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role, u.title AS t,"
-        " u.color AS c,"
+        " u.color AS c, u.badge_override AS b,"
         " (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes,"
         " (SELECT COUNT(*) FROM comments c2 WHERE c2.post_id=p.id) comments"
         " FROM posts p JOIN users u ON u.uid=p.uid"
@@ -361,7 +388,7 @@ def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0
                 "created_at": r["created_at"],
                 "likes": r["likes"],
                 "comments": r["comments"],
-                "author": author_of(r, "t", "c"),
+                "author": author_of(r, "t", "c", "b"),
             }
             for r in rows
         ],
@@ -371,6 +398,8 @@ def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0
 @app.post("/api/posts")
 def create_post(data: PostIn, uid: int = Depends(current_uid)):
     with db() as conn:
+        if conn.execute("SELECT banned FROM users WHERE uid=?", (uid,)).fetchone()["banned"]:
+            raise HTTPException(403, "账号已被封禁，不能发帖")
         cur = conn.execute(
             "INSERT INTO posts(uid, title, content, kind, created_at) VALUES (?,?,?,?,?)",
             (uid, data.title.strip(), data.content.strip(), data.kind or "talk", int(time.time())),
@@ -384,14 +413,15 @@ def get_post(post_id: int):
     with db() as conn:
         row = conn.execute(
             "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role,"
-            " u.title AS t, u.color AS c"
+            " u.title AS t, u.color AS c, u.badge_override AS b"
             " FROM posts p JOIN users u ON u.uid=p.uid WHERE p.id=?",
             (post_id,),
         ).fetchone()
         if not row:
             raise HTTPException(404, "帖子不存在")
         comments = conn.execute(
-            "SELECT c.id, c.uid, c.content, c.created_at, u.username, u.role, u.title AS t, u.color AS c2"
+            "SELECT c.id, c.uid, c.content, c.created_at, u.username, u.role, u.title AS t,"
+            " u.color AS c2, u.badge_override AS b2"
             " FROM comments c JOIN users u ON u.uid=c.uid WHERE c.post_id=? ORDER BY c.id ASC",
             (post_id,),
         ).fetchall()
@@ -403,13 +433,13 @@ def get_post(post_id: int):
         "kind": row["kind"],
         "created_at": row["created_at"],
         "likes": likes,
-        "author": author_of(row, "t", "c"),
+        "author": author_of(row, "t", "c", "b"),
         "comments": [
             {
                 "id": c["id"],
                 "content": c["content"],
                 "created_at": c["created_at"],
-                "author": author_of(c, "t", "c2"),
+                "author": author_of(c, "t", "c2", "b2"),
             }
             for c in comments
         ],
@@ -419,6 +449,8 @@ def get_post(post_id: int):
 @app.post("/api/posts/{post_id}/comments")
 def add_comment(post_id: int, data: CommentIn, uid: int = Depends(current_uid)):
     with db() as conn:
+        if conn.execute("SELECT banned FROM users WHERE uid=?", (uid,)).fetchone()["banned"]:
+            raise HTTPException(403, "账号已被封禁，不能评论")
         if not conn.execute("SELECT 1 FROM posts WHERE id=?", (post_id,)).fetchone():
             raise HTTPException(404, "帖子不存在")
         conn.execute(
@@ -445,6 +477,18 @@ def toggle_like(post_id: int, uid: int = Depends(current_uid)):
     return {"ok": True, "liked": liked, "likes": total}
 
 
+@app.get("/api/notice")
+def current_notice():
+    """当前生效的公告；客户端和官网都能读，没有就返回 null."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT text, level, created_at FROM notices WHERE active=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return {"notice": None}
+    return {"notice": {"text": row["text"], "level": row["level"], "created_at": row["created_at"]}}
+
+
 @app.get("/api/stats")
 def stats():
     with db() as conn:
@@ -452,6 +496,12 @@ def stats():
         posts = conn.execute("SELECT COUNT(*) c FROM posts").fetchone()["c"]
         comments = conn.execute("SELECT COUNT(*) c FROM comments").fetchone()["c"]
     return {"users": users, "posts": posts, "comments": comments}
+
+
+import admin_panel  # noqa: E402
+
+admin_panel.bind(db, badge_for, admin_uid_list)
+app.include_router(admin_panel.router)
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -93,6 +93,11 @@ class UI:
     def consumed(self) -> bool:
         return self._consumed
 
+    def hit_test(self, widget_id: str, rect, enabled: bool = True) -> bool:
+        """只判点击、不画东西：给自绘控件（色板、头像块）用."""
+        _, clicked = self._hit(widget_id, pygame.Rect(rect), enabled)
+        return clicked
+
     # ------------------------------------------------------------------ 控件
     def button(self, widget_id: str, rect, label: str, kind: str = "default",
                enabled: bool = True, font_size: int = 15) -> bool:

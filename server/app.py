@@ -40,6 +40,21 @@ ADMIN_UIDS = {
 TOKEN_DAYS = 30
 PW_ROUNDS = 120_000
 
+# 个性化：称号 / 签名长度上限，配色白名单（客户端同一份色板）
+TITLE_MAX = 8
+BIO_MAX = 40
+PALETTE = (
+    "",         # 默认
+    "#D4A84A",  # 金
+    "#4A9EE0",  # 蓝
+    "#43C08A",  # 绿
+    "#E0685E",  # 红
+    "#A66BD4",  # 紫
+    "#E08CB4",  # 粉
+    "#E0A33C",  # 橙
+    "#5FB7C7",  # 青
+)
+
 app = FastAPI(title="Gamepad Studio Community", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -68,7 +83,10 @@ def init_db() -> None:
               username   TEXT NOT NULL UNIQUE,
               pw_hash    TEXT NOT NULL,
               role       TEXT NOT NULL DEFAULT 'user',
-              created_at INTEGER NOT NULL
+              created_at INTEGER NOT NULL,
+              title      TEXT NOT NULL DEFAULT '',
+              bio        TEXT NOT NULL DEFAULT '',
+              color      TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS tokens (
               token      TEXT PRIMARY KEY,
@@ -103,6 +121,11 @@ def init_db() -> None:
         conn.execute(
             "INSERT OR IGNORE INTO sqlite_sequence(name, seq) VALUES ('users', 1000)"
         )
+        # 老库补列：个性化字段（称号 / 签名 / 配色）
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        for col in ("title", "bio", "color"):
+            if col not in have:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
 init_db()
@@ -167,7 +190,17 @@ def current_uid(authorization: Optional[str] = Header(None)) -> int:
 
 
 def user_row(conn: sqlite3.Connection, uid: int):
-    return conn.execute("SELECT uid, username, role, created_at FROM users WHERE uid=?", (uid,)).fetchone()
+    return conn.execute(
+        "SELECT uid, username, role, created_at, title, bio, color FROM users WHERE uid=?",
+        (uid,),
+    ).fetchone()
+
+
+def _pick(row, key: str) -> str:
+    try:
+        return str(row[key] or "")
+    except (IndexError, KeyError, TypeError):
+        return ""
 
 
 def public_user(row) -> dict:
@@ -177,6 +210,19 @@ def public_user(row) -> dict:
         "badge": badge_for(row["uid"], row["role"]),
         "role": row["role"],
         "created_at": row["created_at"],
+        "title": _pick(row, "title"),
+        "bio": _pick(row, "bio"),
+        "color": _pick(row, "color"),
+    }
+
+
+def author_of(row, title_key: str = "title", color_key: str = "color") -> dict:
+    return {
+        "uid": row["uid"],
+        "username": row["username"],
+        "badge": badge_for(row["uid"], row["role"]),
+        "title": _pick(row, title_key),
+        "color": _pick(row, color_key),
     }
 
 
@@ -194,6 +240,13 @@ class PostIn(BaseModel):
 
 class CommentIn(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
+
+
+class ProfileIn(BaseModel):
+    """个性化字段；全部可选，只改传上来的那一项."""
+    title: Optional[str] = None
+    bio: Optional[str] = None
+    color: Optional[str] = None
 
 
 # ------------------------------------------------------------------ 接口
@@ -227,7 +280,7 @@ def register(data: AuthIn):
 def login(data: AuthIn):
     with db() as conn:
         row = conn.execute(
-            "SELECT uid, username, pw_hash, role, created_at FROM users WHERE username=?",
+            "SELECT uid, username, pw_hash, role, created_at, title, bio, color FROM users WHERE username=?",
             (data.username.strip(),),
         ).fetchone()
         if not row or not verify_pw(data.password, row["pw_hash"]):
@@ -257,12 +310,36 @@ def profile(uid: int):
     return data
 
 
+@app.patch("/api/me")
+def update_me(data: ProfileIn, uid: int = Depends(current_uid)):
+    """个性化：称号 / 签名 / 配色. 只改传上来的字段."""
+    title = data.title.strip() if data.title is not None else None
+    bio = data.bio.strip() if data.bio is not None else None
+    color = data.color.strip().upper() if data.color is not None else None
+    if title is not None and len(title) > TITLE_MAX:
+        raise HTTPException(400, f"称号最多 {TITLE_MAX} 个字")
+    if bio is not None and len(bio) > BIO_MAX:
+        raise HTTPException(400, f"签名最多 {BIO_MAX} 个字")
+    if color is not None and color and color not in PALETTE:
+        raise HTTPException(400, "这个颜色不在可选范围里")
+    with db() as conn:
+        if title is not None:
+            conn.execute("UPDATE users SET title=? WHERE uid=?", (title, uid))
+        if bio is not None:
+            conn.execute("UPDATE users SET bio=? WHERE uid=?", (bio, uid))
+        if color is not None:
+            conn.execute("UPDATE users SET color=? WHERE uid=?", (color, uid))
+        row = user_row(conn, uid)
+    return public_user(row)
+
+
 @app.get("/api/posts")
 def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0), kind: Optional[str] = None):
     sql = (
-        "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role,"
+        "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role, u.title AS t,"
+        " u.color AS c,"
         " (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes,"
-        " (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) comments"
+        " (SELECT COUNT(*) FROM comments c2 WHERE c2.post_id=p.id) comments"
         " FROM posts p JOIN users u ON u.uid=p.uid"
     )
     params: list = []
@@ -284,7 +361,7 @@ def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0
                 "created_at": r["created_at"],
                 "likes": r["likes"],
                 "comments": r["comments"],
-                "author": {"uid": r["uid"], "username": r["username"], "badge": badge_for(r["uid"], r["role"])},
+                "author": author_of(r, "t", "c"),
             }
             for r in rows
         ],
@@ -306,14 +383,15 @@ def create_post(data: PostIn, uid: int = Depends(current_uid)):
 def get_post(post_id: int):
     with db() as conn:
         row = conn.execute(
-            "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role"
+            "SELECT p.id, p.uid, p.title, p.content, p.kind, p.created_at, u.username, u.role,"
+            " u.title AS t, u.color AS c"
             " FROM posts p JOIN users u ON u.uid=p.uid WHERE p.id=?",
             (post_id,),
         ).fetchone()
         if not row:
             raise HTTPException(404, "帖子不存在")
         comments = conn.execute(
-            "SELECT c.id, c.uid, c.content, c.created_at, u.username, u.role"
+            "SELECT c.id, c.uid, c.content, c.created_at, u.username, u.role, u.title AS t, u.color AS c2"
             " FROM comments c JOIN users u ON u.uid=c.uid WHERE c.post_id=? ORDER BY c.id ASC",
             (post_id,),
         ).fetchall()
@@ -325,13 +403,13 @@ def get_post(post_id: int):
         "kind": row["kind"],
         "created_at": row["created_at"],
         "likes": likes,
-        "author": {"uid": row["uid"], "username": row["username"], "badge": badge_for(row["uid"], row["role"])},
+        "author": author_of(row, "t", "c"),
         "comments": [
             {
                 "id": c["id"],
                 "content": c["content"],
                 "created_at": c["created_at"],
-                "author": {"uid": c["uid"], "username": c["username"], "badge": badge_for(c["uid"], c["role"])},
+                "author": author_of(c, "t", "c2"),
             }
             for c in comments
         ],

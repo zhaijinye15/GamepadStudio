@@ -569,6 +569,28 @@ class App:
 
         threading.Thread(target=worker, name="community-like", daemon=True).start()
 
+    def community_save_profile(self, title: str, bio: str, color: str) -> None:
+        """保存称号 / 签名 / 配色，成功后就刷新列表，让新样子立刻出现在别人的视野里."""
+        screen = self.screens.get("community")
+        if screen is None or not self.community.logged_in:
+            return
+        screen.busy = "profile"
+        screen.error = ""
+        screen.hint = ""
+
+        def worker() -> None:
+            try:
+                self.community.update_profile(title=title.strip(), bio=bio.strip(), color=color)
+                screen.hint = "个性化已保存"
+                self.set_status("社区资料已更新", 4.0)
+                screen.posts = self.community.list_posts(30)
+            except Exception as exc:
+                screen.error = str(exc)
+            finally:
+                screen.busy = ""
+
+        threading.Thread(target=worker, name="community-profile", daemon=True).start()
+
     def launch_game(self, entry) -> None:
         """游戏/手游启动：全部放到后台线程，避免等待模拟器时卡住界面."""
         self.game_launching = entry.name

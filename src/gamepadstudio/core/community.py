@@ -8,7 +8,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-DEFAULT_BASE = "http://8.217.155.133"
+DEFAULT_BASE = "https://zhaijinye.qd.je"
+# 1.3.2 及更早版本写死的旧地址；加载时自动迁到 DEFAULT_BASE
+LEGACY_HOSTS = ("8.217.155.133",)
 TIMEOUT = 12
 
 
@@ -33,7 +35,11 @@ class CommunityClient:
         except (OSError, ValueError):
             return
         if isinstance(data, dict):
-            self.base = data.get("base") or DEFAULT_BASE
+            base = data.get("base") or DEFAULT_BASE
+            # 老版本存的裸 IP 地址统一迁到域名（换服务器时客户端不用改）
+            if any(host in base for host in LEGACY_HOSTS):
+                base = DEFAULT_BASE
+            self.base = base
             self.token = data.get("token") or ""
             user = data.get("user")
             self.user = user if isinstance(user, dict) else {}
@@ -124,10 +130,41 @@ class CommunityClient:
     def stats(self) -> Dict[str, Any]:
         return self._request("GET", "/api/stats")
 
+    # ------------------------------------------------------------ 个性化
+    def update_profile(self, title: Optional[str] = None, bio: Optional[str] = None,
+                       color: Optional[str] = None) -> Dict[str, Any]:
+        """改称号 / 签名 / 配色；只提交传进来的字段，没传的不动."""
+        if not self.token:
+            raise CommunityError("还没有登录")
+        body: Dict[str, Any] = {}
+        if title is not None:
+            body["title"] = title
+        if bio is not None:
+            body["bio"] = bio
+        if color is not None:
+            body["color"] = color
+        if not body:
+            return self.user
+        self.user = self._request("PATCH", "/api/me", body, auth=True)
+        self._save()
+        return self.user
+
     # ------------------------------------------------------------ 展示
     @property
     def badge(self) -> str:
         return str(self.user.get("badge", "normal"))
+
+    @property
+    def title(self) -> str:
+        return str(self.user.get("title", "") or "")
+
+    @property
+    def bio(self) -> str:
+        return str(self.user.get("bio", "") or "")
+
+    @property
+    def color(self) -> str:
+        return str(self.user.get("color", "") or "")
 
     @property
     def uid(self) -> int:

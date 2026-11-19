@@ -16,7 +16,7 @@ SetCompressorDictSize 32
 
 !define APP_NAME      "Gamepad Studio"
 !define APP_NAME_CN   "手柄测试与映射"
-!define APP_VERSION   "1.3.2"
+!define APP_VERSION   "1.3.3"
 !define APP_PUBLISHER "Gamepad Studio Project"
 !define APP_URL       "https://github.com/"
 !define UNINST_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\GamepadStudio"
@@ -38,7 +38,7 @@ BrandingText "${APP_NAME} ${APP_VERSION}"
 ShowInstDetails show
 ShowUninstDetails show
 
-VIProductVersion "1.3.2.0"
+VIProductVersion "1.3.3.0"
 VIAddVersionKey "ProductName"     "${APP_NAME}"
 VIAddVersionKey "ProductVersion"  "${APP_VERSION}"
 VIAddVersionKey "FileVersion"     "${APP_VERSION}.0"

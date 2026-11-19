@@ -1,7 +1,7 @@
-"""社区页：注册 / 登录 / 看帖 / 发帖 / 点赞.
+"""社区页：注册 / 登录 / 看帖 / 发帖 / 点赞 / 个性化.
 
-密码走后端 PBKDF2 存储，这里只保存 token；UID 按后端规则着色：
-black（管理员认定）· gold（靓号）· normal（普通）
+UID 徽标代表身份（black=认证，gold=靓号）；称号 / 配色 / 签名由用户自己改：
+称号跟在徽标后面，配色决定头像圆牌和称号的颜色，签名放在顶部卡片里。
 """
 from __future__ import annotations
 
@@ -10,30 +10,70 @@ import pygame
 from .. import theme
 
 BADGE_TEXT = {"black": "认证", "gold": "靓号", "normal": ""}
-BADGE_COLOR = {
-    "black": (18, 18, 20),
-    "gold": (212, 168, 74),
-    "normal": theme.TEXT_MUTED,
-}
-BADGE_BORDER = {
-    "black": (212, 168, 74),
-    "gold": (166, 128, 46),
-    "normal": theme.BORDER_SOFT,
-}
+GOLD = (212, 168, 74)
+GOLD_DARK = (166, 128, 46)
+INK = (24, 26, 30)
+
+# 与服务端 PALETTE 一一对应（顺序一致，改一边必须同步另一边）
+ACCENTS = (
+    "",         # 默认灰
+    "#D4A84A",  # 金
+    "#4A9EE0",  # 蓝
+    "#43C08A",  # 绿
+    "#E0685E",  # 红
+    "#A66BD4",  # 紫
+    "#E08CB4",  # 粉
+    "#E0A33C",  # 橙
+    "#5FB7C7",  # 青
+)
+
+
+def _rgb(hex_color: str, fallback):
+    """#RRGGBB → (r,g,b)；解析不了就用 fallback."""
+    try:
+        text = str(hex_color or "").strip().lstrip("#")
+        if len(text) == 6:
+            return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, TypeError):
+        pass
+    return fallback
+
+
+def _lum(color) -> float:
+    return 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+
+
+def person_color(data) -> tuple:
+    """这个人的主题色：没设过就用灰色."""
+    return _rgb(str(data.get("color", "") or ""), theme.TEXT_DIM)
 
 
 def draw_badge(surface, font, badge: str, pos, text: str = "") -> pygame.Rect:
-    """画一个 UID 徽标：普通为灰描边，金色为金边，黑色为深底金边."""
+    """身份徽标：认证＝金底深字（深色界面上最显眼），靓号＝金边金字，普通＝不画."""
+    badge = str(badge or "normal")
+    if badge not in ("black", "gold"):
+        return pygame.Rect(pos[0], pos[1], 0, 0)
     label = text or BADGE_TEXT.get(badge, "")
     if not label:
         return pygame.Rect(pos[0], pos[1], 0, 0)
     size = font.size(label)
-    rect = pygame.Rect(pos[0], pos[1], size[0] + 14, 20)
-    color = (240, 240, 240) if badge == "black" else (24, 26, 30)
-    theme.rounded_rect(surface, rect, BADGE_COLOR.get(badge, theme.TEXT_MUTED), radius=10,
-                       border=BADGE_BORDER.get(badge, theme.BORDER_SOFT))
-    theme.draw_text(surface, font, label, rect.center, color, align="center")
+    rect = pygame.Rect(pos[0], pos[1], size[0] + 16, 19)
+    if badge == "black":
+        theme.rounded_rect(surface, rect, GOLD, radius=9)
+        theme.draw_text(surface, font, label, rect.center, INK, align="center")
+    else:
+        theme.rounded_rect(surface, rect, theme.PANEL, radius=9, border=GOLD_DARK)
+        theme.draw_text(surface, font, label, rect.center, GOLD, align="center")
     return rect
+
+
+def draw_avatar(surface, font, name: str, color, center, radius: int = 13) -> None:
+    """昵称首字的彩色圆牌，配色不同一眼能认出来."""
+    fill = color if color else theme.PANEL_ALT
+    pygame.draw.circle(surface, fill, center, radius)
+    pygame.draw.circle(surface, theme.lerp_color(fill, (255, 255, 255), 0.25), center, radius, 1)
+    char = (str(name or "?").strip()[:1] or "?").upper()
+    theme.draw_text(surface, font, char, center, INK if _lum(fill) > 140 else theme.TEXT, align="center")
 
 
 class CommunityScreen:
@@ -49,6 +89,11 @@ class CommunityScreen:
         self.posts = []
         self.loaded = False
         self.busy = ""
+        # 个性化编辑区
+        self.p_title = ""
+        self.p_bio = ""
+        self.p_color = ""
+        self._profile_uid = 0
 
     def handle_event(self, event) -> None:
         """键盘输入由 UI 层统一收口，这里不额外处理（与其它页面保持一致）."""
@@ -63,6 +108,14 @@ class CommunityScreen:
             self._draw_logged_in(ui, rect, client)
         else:
             self._draw_login(ui, rect, client)
+
+    def _sync_profile(self, client) -> None:
+        """换账号时把个性化编辑区拉回服务端值，避免显示上一个号的内容."""
+        if self._profile_uid != client.uid:
+            self._profile_uid = client.uid
+            self.p_title = client.title
+            self.p_bio = client.bio
+            self.p_color = client.color
 
     # ---------------------------------------------------------------- 登录前
     def _draw_login(self, ui, rect, client) -> None:
@@ -112,29 +165,71 @@ class CommunityScreen:
     # ---------------------------------------------------------------- 登录后
     def _draw_logged_in(self, ui, rect, client) -> None:
         surface = ui.surface
-        head = pygame.Rect(rect.x, rect.y, rect.width, 172)
-        inner = ui.card(head, "社区", "发帖、看帖、点赞；UID 前的徽标代表身份")
+        self._sync_profile(client)
+        head = pygame.Rect(rect.x, rect.y, rect.width, min(272, max(248, rect.height - 180)))
+        inner = ui.card(head, "社区", "徽标＝身份；称号、配色、签名都能自己改，发帖后所有人可见")
         small = ui.fonts.get(11)
         name_font = ui.fonts.get(15, bold=True)
-        theme.draw_text(surface, name_font, client.user.get("username", ""), (inner.x, inner.y + 2), theme.TEXT)
-        name_w = name_font.size(client.user.get("username", ""))[0]
-        badge_rect = draw_badge(surface, small, client.badge, (inner.x + name_w + 10, inner.y + 4))
-        uid_x = badge_rect.right + 8 if badge_rect.width else inner.x + name_w + 10
-        theme.draw_text(surface, small, f"UID {client.uid}", (uid_x, inner.y + 5), theme.TEXT_MUTED)
+        tint = person_color(client.user)
+
+        # 第一行：头像 + 昵称 + 身份徽标 + 称号 + UID
+        y0 = inner.y + 2
+        draw_avatar(surface, name_font, client.user.get("username", ""), tint, (inner.x + 13, y0 + 11), 13)
+        name_x = inner.x + 32
+        username = str(client.user.get("username", ""))
+        theme.draw_text(surface, name_font, username, (name_x, y0), theme.TEXT)
+        x = name_x + name_font.size(username)[0] + 8
+        badge_rect = draw_badge(surface, small, client.badge, (x, y0 + 5))
+        if badge_rect.width:
+            x = badge_rect.right + 8
+        if client.title:
+            title_font = ui.fonts.get(12, bold=True)
+            theme.draw_text(surface, title_font, client.title, (x, y0 + 4), tint)
+            x += title_font.size(client.title)[0] + 8
+        label = f"UID {client.uid}"
+        if badge_rect.width or client.title:
+            label = f"· {label}"
+        theme.draw_text(surface, small, label, (x, y0 + 5), theme.TEXT_MUTED)
 
         if ui.button("comm_out", pygame.Rect(inner.right - 84, inner.y, 84, 26), "退出登录",
                      kind="ghost", font_size=12):
             client.logout()
             self.posts = []
             self.loaded = False
+            self._profile_uid = 0
             self.hint = "已退出登录"
         if ui.button("comm_reload", pygame.Rect(inner.right - 176, inner.y, 84, 26),
                      "刷新中…" if self.busy == "refresh" else "刷新帖子",
                      kind="default", enabled=not self.busy, font_size=12):
             self.app.community_refresh()
 
-        # 发帖区：标题一行 + 正文一行，避免和下面的列表卡片打架
-        y = inner.y + 30
+        # 第二行：称号 + 配色色板 + 保存
+        y = inner.y + 32
+        self.p_title = ui.text_input("comm_p_title", pygame.Rect(inner.x, y, 150, 28),
+                                     self.p_title, "称号（最多 8 字）", max_len=8)
+        swatch_x = inner.x + 166
+        swatch_y = y + 14
+        for index, accent in enumerate(ACCENTS):
+            box = pygame.Rect(swatch_x + index * 26 - 9, swatch_y - 9, 18, 18)
+            if ui.hit_test(f"comm_color_{index}", box):
+                self.p_color = accent
+            chosen = (self.p_color or "") == accent
+            fill = _rgb(accent, theme.PANEL_ALT) if accent else theme.PANEL_ALT
+            pygame.draw.circle(surface, fill, box.center, 9)
+            pygame.draw.circle(surface, theme.ACCENT if chosen else theme.BORDER_SOFT,
+                               box.center, 9, 2 if chosen else 1)
+        if ui.button("comm_save_profile", pygame.Rect(inner.right - 96, y, 92, 28),
+                     "保存中…" if self.busy == "profile" else "保存",
+                     kind="default", enabled=not self.busy, font_size=12):
+            self.app.community_save_profile(self.p_title, self.p_bio, self.p_color)
+
+        # 第三行：签名
+        y += 34
+        self.p_bio = ui.text_input("comm_p_bio", pygame.Rect(inner.x, y, inner.width, 28),
+                                   self.p_bio, "签名（最多 40 字，给自己一句话）", max_len=40)
+
+        # 第四行：发帖标题 + 发布
+        y += 34
         title_w = inner.width - 112
         self.title = ui.text_input("comm_title", pygame.Rect(inner.x, y, title_w, 28),
                                    self.title, "帖子标题", max_len=40)
@@ -151,7 +246,7 @@ class CommunityScreen:
         elif self.hint:
             theme.draw_text(surface, small, self.hint, (inner.x, y), theme.TEXT_MUTED)
         else:
-            theme.draw_text(surface, small, "发帖后所有人可见；UID 徽标金色=靓号，黑色=认证",
+            theme.draw_text(surface, small, "金底「认证」＝管理员，金边「靓号」＝好编号；头像和称号跟着你选的配色走",
                             (inner.x, y), theme.TEXT_MUTED)
 
         # 列表
@@ -177,18 +272,40 @@ class CommunityScreen:
             if row.collidepoint(ui.mouse):
                 theme.rounded_rect(surface, row, (22, 27, 35), radius=9)
             author = post.get("author") or {}
-            badge = str(author.get("badge", "normal"))
-            bar = {"gold": (212, 168, 74), "black": (232, 232, 238)}.get(badge, theme.BORDER_SOFT)
+            tint_row = person_color(author)
+            bar = GOLD if str(author.get("badge", "")) in ("gold", "black") else theme.BORDER_SOFT
             pygame.draw.rect(surface, bar,
                              pygame.Rect(row.x + 2, row.y + 12, 3, row.height - 24), border_radius=2)
+
+            draw_avatar(surface, ui.fonts.get(11, bold=True), str(author.get("username", "?")),
+                        tint_row, (row.x + 20, row.y + 18), 10)
             title_font = ui.fonts.get(14, bold=True)
-            theme.draw_text(surface, title_font, theme.ellipsize(title_font, str(post.get("title", "")), row.width - 280),
-                            (row.x + 14, row.y + 8), theme.TEXT)
-            meta = f"{author.get('username', '?')} · UID {author.get('uid', '?')} · 赞 {post.get('likes', 0)} · 评论 {post.get('comments', 0)}"
-            theme.draw_text(surface, ui.fonts.get(11), theme.ellipsize(ui.fonts.get(11), meta, row.width - 280),
-                            (row.x + 14, row.y + 30), theme.TEXT_MUTED)
-            if badge in ("black", "gold"):
-                draw_badge(surface, ui.fonts.get(10), badge, (row.right - 176, row.y + 8))
+            theme.draw_text(surface, title_font,
+                            theme.ellipsize(title_font, str(post.get("title", "")), row.width - 300),
+                            (row.x + 36, row.y + 6), theme.TEXT)
+
+            meta_font = ui.fonts.get(11)
+            author_name = str(author.get("username", "?"))
+            x = row.x + 36
+            theme.draw_text(surface, meta_font, author_name, (x, row.y + 28),
+                            theme.lerp_color(tint_row, theme.TEXT, 0.25))
+            x += meta_font.size(author_name)[0] + 8
+            badge_rect = draw_badge(surface, ui.fonts.get(10), str(author.get("badge", "normal")),
+                                    (x, row.y + 28))
+            if badge_rect.width:
+                x = badge_rect.right + 8
+            title_text = str(author.get("title", "") or "")
+            if title_text:
+                author_font = ui.fonts.get(11, bold=True)
+                theme.draw_text(surface, author_font, title_text, (x, row.y + 28), tint_row)
+                x += author_font.size(title_text)[0] + 8
+            tail = f"UID {author.get('uid', '?')} · 赞 {post.get('likes', 0)} · 评论 {post.get('comments', 0)}"
+            if x > row.x + 36 + meta_font.size(author_name)[0] + 8:
+                tail = f"· {tail}"
+            theme.draw_text(surface, meta_font,
+                            theme.ellipsize(meta_font, tail, max(60, row.right - x - 96)),
+                            (x, row.y + 28), theme.TEXT_MUTED)
+
             if ui.button(f"comm_like_{post.get('id')}", pygame.Rect(row.right - 84, row.y + 10, 70, 26),
                          "赞", kind="default", font_size=12, enabled=not self.busy):
                 self.app.community_like(int(post.get("id", 0)))

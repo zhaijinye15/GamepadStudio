@@ -377,8 +377,14 @@ def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0
     params.extend([limit, offset])
     with db() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return {
+        notice = None
+        if offset == 0 and not kind:
+            notice = conn.execute(
+                "SELECT text, level, created_at FROM notices WHERE active=1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    payload = {
         "total": len(rows),
+        "notice": dict(notice) if notice else None,
         "items": [
             {
                 "id": r["id"],
@@ -393,6 +399,25 @@ def list_posts(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0
             for r in rows
         ],
     }
+    return with_notice(payload)
+
+
+def with_notice(payload: dict) -> dict:
+    """把生效中的公告当成一条置顶条目塞进列表，1.3.3 客户端不用更新也能看见."""
+    notice = payload.get("notice")
+    if notice:
+        pinned = {
+            "id": 0,
+            "title": ("📢 " if notice.get("level") != "warn" else "❗ ") + str(notice.get("text", "")),
+            "content": "",
+            "kind": "notice",
+            "created_at": int(notice.get("created_at") or 0),
+            "likes": 0,
+            "comments": 0,
+            "author": {"uid": 0, "username": "系统公告", "badge": "black", "title": "", "color": "#D4A84A"},
+        }
+        payload["items"] = [pinned] + list(payload.get("items", []))
+    return payload
 
 
 @app.post("/api/posts")
@@ -462,6 +487,8 @@ def add_comment(post_id: int, data: CommentIn, uid: int = Depends(current_uid)):
 
 @app.post("/api/posts/{post_id}/like")
 def toggle_like(post_id: int, uid: int = Depends(current_uid)):
+    if post_id == 0:      # 0 是服务端注入的公告条，点赞无意义
+        return {"ok": True, "liked": False, "likes": 0}
     with db() as conn:
         if not conn.execute("SELECT 1 FROM posts WHERE id=?", (post_id,)).fetchone():
             raise HTTPException(404, "帖子不存在")

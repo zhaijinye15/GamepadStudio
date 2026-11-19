@@ -247,8 +247,8 @@ async def edit_user(uid: int, request: Request):
         fields["banned"] = 1 if body["banned"] else 0
     if "role" in body:
         role = str(body["role"]).strip()
-        if role not in ("user", "moderator"):
-            raise HTTPException(400, "角色只能是 user / moderator")
+        if role not in ("user", "moderator", "admin"):
+            raise HTTPException(400, "角色只能是 普通用户 / 版主 / 管理员")
         fields["role"] = role
     if not fields:
         raise HTTPException(400, "没有要改的字段")
@@ -573,7 +573,7 @@ pre{white-space:pre-wrap;word-break:break-all;background:var(--card2);padding:10
    <div class="card">
     <div class="row"><input id="uq" placeholder="搜用户名 / UID / 称号" style="flex:1" onkeydown="if(event.key==='Enter')loadUsers(1)">
      <button onclick="loadUsers(1)">搜索</button></div>
-    <div style="overflow:auto"><table><thead><tr><th>UID</th><th>用户名</th><th>徽标</th><th>称号</th>
+    <div style="overflow:auto"><table><thead><tr><th>UID</th><th>用户名</th><th>角色</th><th>徽标</th><th>称号</th>
     <th>帖子</th><th>评论</th><th>注册</th><th>操作</th></tr></thead><tbody id="utbody"></tbody></table></div>
     <div class="pager" id="upager"></div>
    </div>
@@ -691,8 +691,10 @@ async function loadOverview(){
 async function loadUsers(page){
   state.users.page=page;
   const d=await api('/admin/api/users?page='+page+'&q='+encodeURIComponent($('uq').value));
+  const ROLE={user:'普通',moderator:'版主',admin:'管理员'};
   $('utbody').innerHTML=d.items.map(u=>`<tr>
     <td>${u.uid}</td><td>${esc(u.username)}${u.banned?' <span class="tag">封禁</span>':''}</td>
+    <td>${ROLE[u.role]||esc(u.role)}</td>
     <td>${badgeChip(u.badge)}</td><td>${esc(u.title)||'<span class="muted">—</span>'}</td>
     <td>${u.posts}</td><td>${u.comments}</td><td class="small muted">${esc(u.created_at)}</td>
     <td><button class="btn-sm" onclick='editUser(${JSON.stringify(u)})'>编辑</button>
@@ -714,7 +716,8 @@ function editUser(u){
    <div class="row"><label>封禁</label><select id="e_ban">
      <option value="0">正常</option><option value="1">禁止登录 / 发帖</option></select></div>
    <div class="row"><label>角色</label><select id="e_role">
-     <option value="user">普通用户</option><option value="moderator">版主</option></select></div>
+     <option value="user">普通用户</option><option value="moderator">版主</option>
+     <option value="admin">管理员（强制金底认证）</option></select></div>
    <div class="err" id="e_err"></div>
    <div class="foot"><button onclick="closeModal()">取消</button>
     <button class="btn-main" onclick="saveUser(${u.uid})">保存</button></div>`;

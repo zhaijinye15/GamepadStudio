@@ -469,6 +469,7 @@ def backup_db():
 
 
 # --------------------------------------------------------------------- 页面
+@router.get("/console", response_class=HTMLResponse)
 @router.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
     if not ADMIN_PASS:

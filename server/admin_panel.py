@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 router = APIRouter()
 
+ADMIN_USER = os.environ.get("GS_ADMIN_USER", "admin").strip() or "admin"
 ADMIN_PASS = os.environ.get("GS_ADMIN_PASS", "").strip()
 ADMIN_SECRET = os.environ.get("GS_ADMIN_SECRET", "").strip() or secrets.token_hex(16)
 COOKIE = "gs_admin"
@@ -76,6 +77,29 @@ def _iso(ts) -> str:
 
 
 # --------------------------------------------------------------------- 登录
+FAILS: dict = {}          # ip -> (失败次数, 首次失败时间)
+FAIL_LIMIT = 6
+FAIL_WINDOW = 600
+
+
+def _guard(ip: str) -> None:
+    """短密码的代价用试错锁补回来：10 分钟内错 6 次就锁."""
+    count, since = FAILS.get(ip, (0, 0.0))
+    if time.time() - since > FAIL_WINDOW:
+        FAILS.pop(ip, None)
+        return
+    if count >= FAIL_LIMIT:
+        left = int(FAIL_WINDOW - (time.time() - since))
+        raise HTTPException(429, f"密码错太多次了，等 {max(1, left // 60)} 分钟再试")
+
+
+def _note_fail(ip: str) -> None:
+    count, since = FAILS.get(ip, (0, time.time()))
+    if time.time() - since > FAIL_WINDOW:
+        count, since = 0, time.time()
+    FAILS[ip] = (count + 1, since)
+
+
 @router.post("/admin/api/login")
 async def admin_login(request: Request, response: Response):
     if not ADMIN_PASS:
@@ -84,11 +108,16 @@ async def admin_login(request: Request, response: Response):
         body = await request.json()
     except Exception:
         body = {}
+    ip = request.client.host if request.client else "?"
+    _guard(ip)
+    username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
-    if not hmac.compare_digest(password, ADMIN_PASS):
+    if not (hmac.compare_digest(username, ADMIN_USER) and hmac.compare_digest(password, ADMIN_PASS)):
+        _note_fail(ip)
         with _DB() as conn:
-            _log(conn, "登录失败", request.client.host if request.client else "")
-        raise HTTPException(403, "密码不对")
+            _log(conn, "登录失败", f"{ip} user={username[:20]}")
+        raise HTTPException(403, "用户名或密码不对")
+    FAILS.pop(ip, None)
     response.set_cookie(COOKIE, _issue(), httponly=True, samesite="lax", max_age=TTL, path="/")
     with _DB() as conn:
         _log(conn, "登录成功", request.client.host if request.client else "")
@@ -497,7 +526,8 @@ th{color:var(--dim);font-weight:500;font-size:12px}
 .warn{background:#241d17;border-color:#5a4526;color:#f0d9b0}
 #login{max-width:360px;margin:12vh auto}
 #login .card{text-align:center}
-#login input{width:100%;margin:10px 0}
+#login input{width:100%;margin:6px 0}
+#login #uname{margin-top:10px}
 .err{color:var(--red);font-size:12px;min-height:16px}
 pre{white-space:pre-wrap;word-break:break-all;background:var(--card2);padding:10px;border-radius:8px;font-size:12px}
 </style></head><body>
@@ -505,8 +535,9 @@ pre{white-space:pre-wrap;word-break:break-all;background:var(--card2);padding:10
  <div id="login" class="hide">
   <div class="card">
    <h1>GAMEPAD <b>STUDIO</b></h1>
-   <div class="sub">管理后台 · 只有你知道密码</div>
-   <input id="pw" type="password" placeholder="管理员密码" autocomplete="off">
+   <div class="sub">管理后台 · 账号 + 密码</div>
+   <input id="uname" placeholder="管理员账号" autocomplete="username">
+   <input id="pw" type="password" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
    <div class="err" id="loginerr"></div>
    <button class="btn-main" style="width:100%" onclick="doLogin()">登录</button>
   </div>
@@ -622,7 +653,7 @@ async function doLogin(){
   $('loginerr').textContent='';
   try{
     await api('/admin/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({password:$('pw').value})});
+      body:JSON.stringify({username:$('uname').value,password:$('pw').value})});
     showApp();reloadAll();
   }catch(e){$('loginerr').textContent=e.message}
 }

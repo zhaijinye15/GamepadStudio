@@ -408,7 +408,8 @@ def with_notice(payload: dict) -> dict:
     if notice:
         pinned = {
             "id": 0,
-            "title": ("📢 " if notice.get("level") != "warn" else "❗ ") + str(notice.get("text", "")),
+            "title": ("【公告】" if notice.get("level") != "warn" else "【重要公告】")
+                     + str(notice.get("text", "")),
             "content": "",
             "kind": "notice",
             "created_at": int(notice.get("created_at") or 0),
